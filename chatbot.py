@@ -36,6 +36,7 @@ DEVICE_INDEX    = None  # 預設裝置
 OUTFILE         = "chatbot.wav"
 WHISPER_MODEL   = "models/ggml-large-v3.bin"
 OLLAMA_MODEL    = "llama3"
+LANG_CODE = ""   # language code passed to whisper, set via --lang
 
 DEBUG_RECORDING = False  # 錄音除錯訊息開關，False 時靜音
 def dprint(*args, **kwargs):
@@ -147,8 +148,11 @@ def record_once() -> float:
 def run_whisper(filepath: str) -> str:
     pretty_print("[WHISPER]", "Running whisper-cpp transcription...")
     try:
+        cmd = ["whisper-cpp", "--model", WHISPER_MODEL, "--file", filepath]
+        if LANG_CODE:
+            cmd.extend(["-l", LANG_CODE])
         result = subprocess.run(
-            ["whisper-cpp", "--model", WHISPER_MODEL, "--file", filepath, "-nt"],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -224,15 +228,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", type=str, help="指定聲音檔案")
     parser.add_argument("--url", type=str, help="指定 YouTube 影片網址")
-    parser.add_argument("--prompt", type=str, default="please response in 3 sentences", help="預設 prompt 前給（未指定時自帶 'please response in 3 sentences'）")
+    parser.add_argument("--lang", type=str, default="", help="Language code to pass to whisper (e.g., zh, en, ja)")
+    parser.add_argument("--prompt", type=str, default="Please response in the same language and in 3 sentences", help="預設 prompt 前給（未指定時自帶 'please response in 3 sentences'）")
     args = parser.parse_args()
+
+    LANG_CODE = args.lang.strip()
 
     # Startup banner
     print("\n\n\n", end="")
     pretty_print("[CHATBOT]", "Start...")
 
     def handle_transcript(transcript: str):
-        full_prompt = f"{args.prompt} {transcript}".strip()
+        full_prompt = f"{transcript} {args.prompt}".strip()
+        pretty_print("[OLLAMA]", f"Postfix prompt: {args.prompt}")
         reply = ask_ollama(full_prompt)
         pretty_print("[OLLAMA]", reply)
         speak(reply)
