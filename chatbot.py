@@ -1,6 +1,18 @@
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
+
+# ---- 抑制 pkg_resources deprecation 警告 (Python 3.12+) ----
+import warnings, sys
+if sys.version_info >= (3, 12):
+    warnings.filterwarnings(
+        "ignore",
+        message="pkg_resources.*deprecated",
+        category=UserWarning,
+        module="webrtcvad",
+    )
+# ------------------------------------------------------------
+
 import webrtcvad
 import time
 import subprocess
@@ -25,12 +37,60 @@ OUTFILE         = "chatbot.wav"
 WHISPER_MODEL   = "models/ggml-large-v3.bin"
 OLLAMA_MODEL    = "llama3"
 
+DEBUG_RECORDING = False  # 錄音除錯訊息開關，False 時靜音
+def dprint(*args, **kwargs):
+    """僅在 DEBUG_RECORDING 開啟時輸出"""
+    if DEBUG_RECORDING:
+        print('[DEBUG_RECORDING]', *args, **kwargs)
+
+DEBUG_WHISPER = False  # Whisper 除錯訊息開關，False 時靜音
+def wprint(*args, **kwargs):
+    """僅在 DEBUG_WHISPER 開啟時輸出"""
+    if DEBUG_WHISPER:
+        print('[DEBUG_WHISPER]', *args, **kwargs)
+
+import textwrap
+
+PREFIX_COL  = 12    # 訊息起始欄位 (含左右中括號)
+LINE_WIDTH  = 80    # 既有設定：總欄寬
+PAD         = 1     # 前綴與訊息之間的空格
+
+# ---- ANSI grayscale colors ----
+LIGHT_GREY = "\033[38;5;250m"   # odd lines (brighter)
+DARK_GREY  = "\033[38;5;245m"   # even lines (darker)
+RESET_CLR  = "\033[0m"
+
+MSG_COUNTER = 0   # global message counter for alternating colors
+
+def pretty_print(prefix: str, msg: str):
+    """
+    Print message with prefix left‑justified to PREFIX_COL,
+    wrap text to LINE_WIDTH, and align continuation lines.
+    All lines in the same message share the same color.
+    Odd / even messages alternate between LIGHT_GREY & DARK_GREY.
+    """
+    global MSG_COUNTER
+    color = LIGHT_GREY if MSG_COUNTER % 2 == 0 else DARK_GREY
+
+    prefix = prefix.rjust(PREFIX_COL)
+    indent = " " * (PREFIX_COL + PAD)
+    wrapped = textwrap.wrap(str(msg), width=LINE_WIDTH - len(indent)) or [""]
+
+    # first line
+    print(f"{color}{prefix}{' ' * PAD}{wrapped[0]}{RESET_CLR}")
+
+    # continuation lines
+    for line in wrapped[1:]:
+        print(f"{color}{indent}{line}{RESET_CLR}")
+
+    MSG_COUNTER += 1
+
 vad = webrtcvad.Vad(VAD_MODE)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 def record_once() -> float:
     is_rec, buf, sil_start, seg_start, done = False, [], None, None, False
-    print("🔍 開始監聽中，等待語音輸入...")
+    dprint("Listening for speech...")
 
     def cb(indata, frames, *_):
         nonlocal is_rec, buf, sil_start, seg_start, done
@@ -40,7 +100,8 @@ def record_once() -> float:
 
         if is_speech:
             if not is_rec:
-                print("🎤 偵測到語音，開始錄音...")
+                dprint("Speech detected, start recording...")
+                pretty_print("[RECORDING]", "Recording...")
                 buf, seg_start = [], now
             is_rec = True
             buf.append(indata.copy())
@@ -48,13 +109,15 @@ def record_once() -> float:
         elif is_rec:
             if sil_start is None:
                 sil_start = now
-                print("🤫 開始偵測靜音...")
+                if DEBUG_RECORDING:
+                    print('.', end='', flush=True)
             elif now - sil_start > SILENCE_TIMEOUT:
-                print(f"🤫 偵測到靜音 {SILENCE_TIMEOUT}s，自動結束錄音")
+                if DEBUG_RECORDING:
+                    print('.', end='', flush=True)
                 done = True
 
         if is_rec and seg_start and now - seg_start > MAX_SEG_SECS:
-            print(f"⏰ 已達最大錄音長度 {MAX_SEG_SECS}s，自動結束")
+            dprint(f"Maximum segment length {MAX_SEG_SECS}s reached, stopping recording")
             done = True
 
     try:
@@ -64,25 +127,25 @@ def record_once() -> float:
             while not done:
                 sd.sleep(100)
     except Exception as e:
-        print(f"❌ 錄音過程錯誤: {e}")
+        pretty_print("[ERROR]", f"Recording error: {e}")
         return 0.0
 
     if not buf:
-        print("❌ 無聲音輸入，未錄到任何內容")
+        pretty_print("[ERROR]", "No speech detected, nothing recorded")
         return 0.0
 
     audio = np.concatenate(buf, axis=0)
     dur = len(audio) / SAMPLE_RATE
     if dur < MIN_DURATION:
-        print(f"⚠️ 錄音僅 {dur:.2f}s，低於最短長度 {MIN_DURATION}s，不儲存")
+        dprint(f"Recording only {dur:.2f}s (< {MIN_DURATION}s), not saved")
         return 0.0
 
     sf.write(os.path.join(script_dir, OUTFILE), audio, SAMPLE_RATE, subtype='PCM_16')
-    print(f"✅ 錄音完成並儲存為 {OUTFILE}（{dur:.2f}s）")
+    pretty_print("[RECORDING]", f"Saved recording as {OUTFILE} ({dur:.2f}s)")
     return dur
 
 def run_whisper(filepath: str) -> str:
-    print("[1/3] 使用 whisper-cpp 進行語音辨識...")
+    pretty_print("[WHISPER]", "Running whisper-cpp transcription...")
     try:
         result = subprocess.run(
             ["whisper-cpp", "--model", WHISPER_MODEL, "--file", filepath, "-nt"],
@@ -90,25 +153,27 @@ def run_whisper(filepath: str) -> str:
             stderr=subprocess.PIPE,
             text=True,
         )
-        # --- 顯示 Whisper 原始輸出 ---
-        print("----- Whisper 原始輸出 -----")
-        print(result.stdout.strip())
-        print("----------- END -----------")
-
-        if result.stderr:
-            print(f"Whisper stderr: {result.stderr}")
+        # --- 顯示 Whisper 原始輸出（逐行加前綴） ---
+        wprint("----- Whisper 原始輸出 -----")
+        for ln in result.stdout.splitlines():
+            wprint(ln)
+        if result.stderr.strip():
+            wprint("--- stderr ---")
+            for ln in result.stderr.splitlines():
+                wprint(ln)
+        wprint("----------- END -----------")
 
         lines = result.stdout.strip().splitlines()
         lines = [re.sub(r"\[.*?\]\s*", "", line) for line in lines if line.strip()]
         transcript = " ".join(lines)
-        print(f"[辨識結果] {transcript}")
+        pretty_print("[WHISPER]", transcript)
         return transcript
     except Exception as e:
-        print("Whisper 發生錯誤:", e)
+        wprint("Whisper 發生錯誤:", e)
         return ""
 
 def ask_ollama(prompt: str) -> str:
-    print("[2/3] 向 ollama 模型發送 prompt...")
+    pretty_print("[OLLAMA]", "Sending prompt to Ollama model...")
     try:
         response = requests.post(
             "http://localhost:11434/api/generate",
@@ -134,11 +199,11 @@ def ask_ollama(prompt: str) -> str:
         return ""
 
 def speak(text: str):
-    print("[3/3] 播放語音回應...")
+    pretty_print("[TTS]", "Playing TTS response...")
     subprocess.run(["say", text])
 
 def download_youtube_audio(url: str, output_file: str) -> bool:
-    print(f"🎞️ 下載 YouTube 音訊: {url}")
+    pretty_print("[YT-DLP]", f"Downloading YouTube audio: {url}")
     try:
         result = subprocess.run(
             ["yt-dlp", "-x", "--audio-format", "wav", "--force-overwrites", "--output", output_file, url],
@@ -147,12 +212,12 @@ def download_youtube_audio(url: str, output_file: str) -> bool:
             text=True,
         )
         if result.returncode != 0:
-            print("❌ yt-dlp 執行錯誤:", result.stderr)
+            pretty_print("[YT-DLP]", f"yt-dlp error: {result.stderr}")
             return False
-        print("✅ 下載完成")
+        pretty_print("[YT-DLP]", "Download complete")
         return True
     except Exception as e:
-        print("❌ 無法執行 yt-dlp:", e)
+        pretty_print("[YT-DLP]", f"Failed to run yt-dlp: {e}")
         return False
 
 if __name__ == "__main__":
@@ -162,10 +227,14 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default="please response in 3 sentences", help="預設 prompt 前給（未指定時自帶 'please response in 3 sentences'）")
     args = parser.parse_args()
 
+    # Startup banner
+    print("\n\n\n", end="")
+    pretty_print("[CHATBOT]", "Start...")
+
     def handle_transcript(transcript: str):
         full_prompt = f"{args.prompt} {transcript}".strip()
         reply = ask_ollama(full_prompt)
-        print(f"[模型回應] {reply}")
+        pretty_print("[OLLAMA]", reply)
         speak(reply)
 
     if args.url:
@@ -175,20 +244,20 @@ if __name__ == "__main__":
             if transcript:
                 handle_transcript(transcript)
             else:
-                print("❌ Whisper 無法辨識語音內容")
+                pretty_print("[WHISPER]", "Whisper could not transcribe audio")
         else:
-            print("❌ 無法下載或找不到 chatbot.wav")
+            pretty_print("[YT-DLP]", "Download failed or chatbot.wav not found")
 
     elif args.file:
         if not os.path.isfile(args.file):
-            print(f"❌ 指定的聲音檔不存在: {args.file}")
+            pretty_print("[ERROR]", f"Audio file not found: {args.file}")
             sys.exit(1)
-        print(f"🔁 使用提供的聲音檔案: {args.file}")
+        pretty_print("[RECORDING]", f"Using provided audio file: {args.file}")
         transcript = run_whisper(args.file)
         if transcript:
             handle_transcript(transcript)
         else:
-            print("❌ Whisper 無法辨識語音內容")
+            pretty_print("[WHISPER]", "Whisper could not transcribe audio")
 
     else:
         while True:
@@ -198,6 +267,6 @@ if __name__ == "__main__":
                 if transcript:
                     handle_transcript(transcript)
                 else:
-                    print("❌ Whisper 無法辨識語音內容")
+                    pretty_print("[WHISPER]", "Whisper could not transcribe audio")
             else:
-                print("🛑 錄音太短，跳過辨識與回應")
+                dprint("Recording too short, skipping transcription and response")
