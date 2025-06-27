@@ -18,11 +18,11 @@ FRAME_SIZE      = int(SAMPLE_RATE * FRAME_DURATION / 1000)
 CHANNELS        = 1
 VAD_MODE        = 2     # 0: 最保守, 3: 最靈敏
 SILENCE_TIMEOUT = 1.5   # 秒
-MAX_SEG_SECS    = 10.0  # 最長錄音長度
+MAX_SEG_SECS    = 1200.0  # 最長錄音長度（秒）
 MIN_DURATION    = 2.0   # 少於這個長度不存檔
 DEVICE_INDEX    = None  # 預設裝置
 OUTFILE         = "chatbot.wav"
-WHISPER_MODEL   = "models/ggml-base.bin"
+WHISPER_MODEL   = "models/ggml-large-v3.bin"
 OLLAMA_MODEL    = "llama3"
 
 vad = webrtcvad.Vad(VAD_MODE)
@@ -90,6 +90,11 @@ def run_whisper(filepath: str) -> str:
             stderr=subprocess.PIPE,
             text=True,
         )
+        # --- 顯示 Whisper 原始輸出 ---
+        print("----- Whisper 原始輸出 -----")
+        print(result.stdout.strip())
+        print("----------- END -----------")
+
         if result.stderr:
             print(f"Whisper stderr: {result.stderr}")
 
@@ -154,7 +159,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", type=str, help="指定聲音檔案")
     parser.add_argument("--url", type=str, help="指定 YouTube 影片網址")
-    parser.add_argument("--prompt", type=str, default="", help="預設 prompt 前給")
+    parser.add_argument("--prompt", type=str, default="please response in 3 sentences", help="預設 prompt 前給（未指定時自帶 'please response in 3 sentences'）")
     args = parser.parse_args()
 
     def handle_transcript(transcript: str):
