@@ -2,7 +2,7 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np
 
-# ---- 抑制 pkg_resources deprecation 警告 (Python 3.12+) ----
+# ---- Suppress pkg_resources deprecation warning (Python 3.12+) ----
 import warnings, sys
 if sys.version_info >= (3, 12):
     warnings.filterwarnings(
@@ -23,38 +23,38 @@ import re
 import sys
 import argparse
 
-# === 參數設定 ===
+# === Parameter Settings ===
 SAMPLE_RATE     = 16000
 FRAME_DURATION  = 30  # ms
 FRAME_SIZE      = int(SAMPLE_RATE * FRAME_DURATION / 1000)
 CHANNELS        = 1
-VAD_MODE        = 2     # 0: 最保守, 3: 最靈敏
-SILENCE_TIMEOUT = 1.5   # 秒
-MAX_SEG_SECS    = 1200.0  # 最長錄音長度（秒）
-MIN_DURATION    = 2.0   # 少於這個長度不存檔
-DEVICE_INDEX    = None  # 預設裝置
+VAD_MODE        = 2     # 0: Most conservative, 3: Most sensitive
+SILENCE_TIMEOUT = 1.5   # seconds
+MAX_SEG_SECS    = 1200.0  # Maximum recording length (seconds)
+MIN_DURATION    = 2.0   # Do not save if shorter than this
+DEVICE_INDEX    = None  # Default device
 OUTFILE         = "chatbot.wav"
 WHISPER_MODEL   = "models/ggml-large-v3.bin"
 OLLAMA_MODEL    = "llama3"
 LANG_CODE = ""   # language code passed to whisper, set via --lang
 
-DEBUG_RECORDING = False  # 錄音除錯訊息開關，False 時靜音
+DEBUG_RECORDING = False  # Recording debug message switch, silent when False
 def dprint(*args, **kwargs):
-    """僅在 DEBUG_RECORDING 開啟時輸出"""
+    """Output only when DEBUG_RECORDING is enabled"""
     if DEBUG_RECORDING:
         print('[DEBUG_RECORDING]', *args, **kwargs)
 
-DEBUG_WHISPER = False  # Whisper 除錯訊息開關，False 時靜音
+DEBUG_WHISPER = False  # Whisper debug message switch, silent when False
 def wprint(*args, **kwargs):
-    """僅在 DEBUG_WHISPER 開啟時輸出"""
+    """Output only when DEBUG_WHISPER is enabled"""
     if DEBUG_WHISPER:
         print('[DEBUG_WHISPER]', *args, **kwargs)
 
 import textwrap
 
-PREFIX_COL  = 12    # 訊息起始欄位 (含左右中括號)
-LINE_WIDTH  = 80    # 既有設定：總欄寬
-PAD         = 1     # 前綴與訊息之間的空格
+PREFIX_COL  = 12    # Message start column (including left and right brackets)
+LINE_WIDTH  = 80    # Existing setting: total width
+PAD         = 1     # Space between prefix and message
 
 # ---- ANSI grayscale colors ----
 LIGHT_GREY = "\033[38;5;250m"   # odd lines (brighter)
@@ -92,9 +92,11 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 def record_once() -> float:
     is_rec, buf, sil_start, seg_start, done = False, [], None, None, False
     dprint("Listening for speech...")
+    speech_started = False  # Flag for first speech detection
+    recording_msg_printed = False
 
     def cb(indata, frames, *_):
-        nonlocal is_rec, buf, sil_start, seg_start, done
+        nonlocal is_rec, buf, sil_start, seg_start, done, speech_started
         pcm = indata[:, 0].tobytes()
         is_speech = vad.is_speech(pcm, SAMPLE_RATE)
         now = time.time()
@@ -102,9 +104,9 @@ def record_once() -> float:
         if is_speech:
             if not is_rec:
                 dprint("Speech detected, start recording...")
-                pretty_print("[RECORDING]", "Recording...")
+                is_rec = True
                 buf, seg_start = [], now
-            is_rec = True
+                speech_started = True
             buf.append(indata.copy())
             sil_start = None
         elif is_rec:
@@ -126,6 +128,9 @@ def record_once() -> float:
                             blocksize=FRAME_SIZE, dtype='int16',
                             device=DEVICE_INDEX, callback=cb):
             while not done:
+                if speech_started and not recording_msg_printed:
+                    pretty_print("[RECORDING]", "Recording...")
+                    recording_msg_printed = True
                 sd.sleep(100)
     except Exception as e:
         pretty_print("[ERROR]", f"Recording error: {e}")
@@ -157,8 +162,8 @@ def run_whisper(filepath: str) -> str:
             stderr=subprocess.PIPE,
             text=True,
         )
-        # --- 顯示 Whisper 原始輸出（逐行加前綴） ---
-        wprint("----- Whisper 原始輸出 -----")
+        # --- Show raw Whisper output (prefix each line) ---
+        wprint("----- Raw Whisper Output -----")
         for ln in result.stdout.splitlines():
             wprint(ln)
         if result.stderr.strip():
@@ -173,7 +178,7 @@ def run_whisper(filepath: str) -> str:
         pretty_print("[WHISPER]", transcript)
         return transcript
     except Exception as e:
-        wprint("Whisper 發生錯誤:", e)
+        wprint("Whisper error:", e)
         return ""
 
 def ask_ollama(prompt: str) -> str:
@@ -199,7 +204,7 @@ def ask_ollama(prompt: str) -> str:
                 continue
         return full_reply
     except Exception as e:
-        print("Ollama 呼叫失敗:", e)
+        print("Ollama call failed:", e)
         return ""
 
 def speak(text: str):
@@ -226,10 +231,10 @@ def download_youtube_audio(url: str, output_file: str) -> bool:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--file", type=str, help="指定聲音檔案")
-    parser.add_argument("--url", type=str, help="指定 YouTube 影片網址")
+    parser.add_argument("--file", type=str, help="Specify audio file")
+    parser.add_argument("--url", type=str, help="Specify YouTube video URL")
     parser.add_argument("--lang", type=str, default="", help="Language code to pass to whisper (e.g., zh, en, ja)")
-    parser.add_argument("--prompt", type=str, default="Please response in the same language and in 3 sentences", help="預設 prompt 前給（未指定時自帶 'please response in 3 sentences'）")
+    parser.add_argument("--prompt", type=str, default="Please response in the same language and in 3 sentences", help="Default prompt prefix (if not specified, uses 'please response in 3 sentences')")
     args = parser.parse_args()
 
     LANG_CODE = args.lang.strip()
@@ -240,7 +245,7 @@ if __name__ == "__main__":
 
     def handle_transcript(transcript: str):
         full_prompt = f"{transcript} {args.prompt}".strip()
-        pretty_print("[OLLAMA]", f"Postfix prompt: {args.prompt}")
+        pretty_print("[OLLAMA]", args.prompt)
         reply = ask_ollama(full_prompt)
         pretty_print("[OLLAMA]", reply)
         speak(reply)

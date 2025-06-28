@@ -128,7 +128,7 @@ def get_new_piece():
     return Piece(GRID_WIDTH//2 - 2, -2, key)
 
 def main():
-    pygame.init();
+    pygame.init()
     win = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
     pygame.display.set_caption("Tetris (simple)")
     clock = pygame.time.Clock()
@@ -139,7 +139,7 @@ def main():
     current_piece = get_new_piece()
     next_piece = get_new_piece()
     score = 0
-    fall_time = 0
+    fall_time = 0  # Unused variable, can be removed
 
     running = True
     while running:
