@@ -1,9 +1,9 @@
-chatbot.wav
-models/ggml-large-v3.bin
-models/ggml-base.bin
-models/ggml-base.en.bin
-models/ggml-medium.bin
-.DS_Store
+
 .vscode/
 
+*.pyc
+
+.DS_Store
+chatbot.wav
 .env
+

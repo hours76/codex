@@ -1,0 +1,7 @@
+numpy
+sounddevice
+soundfile
+webrtcvad
+requests
+yt-dlp
+setuptools
