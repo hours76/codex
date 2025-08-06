@@ -43,5 +43,12 @@
     "notification_duration_ms": 4000,
     "max_notification_width": 300,
     "notification_z_index": 1000
+  },
+  "monitoring": {
+    "enabled": true,
+    "auto_proceed_prompt": "please proceed",
+    "min_response_length": 10,
+    "broadcast_delay_ms": 100,
+    "max_auto_prompts_per_task": 3
   }
 }

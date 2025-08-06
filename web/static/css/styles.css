@@ -193,6 +193,20 @@ body {
     border-left: 4px solid #138496;
 }
 
+.system-message {
+    background-color: #6f42c1 !important;
+    color: white !important;
+    margin-left: auto !important;
+    margin-right: 0 !important;
+    text-align: right !important;
+    border: 2px solid #5a369c !important;
+    border-radius: 15px !important;
+    font-size: 0.9em !important;
+    max-width: 60% !important;
+    display: block !important;
+    position: relative !important;
+}
+
 .timestamp {
     font-size: 0.8em;
     opacity: 0.7;

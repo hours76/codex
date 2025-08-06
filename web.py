@@ -13,6 +13,7 @@ import logging
 
 from core import TaskScheduler
 from models import ChatMessage, ScheduleRequest, get_config
+from monitor import get_task_monitor
 
 logger = logging.getLogger("agent")
 
@@ -410,5 +411,47 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         
         logger.info(f"[API] POST /api/debug - Debug mode {'enabled' if enable else 'disabled'}")
         return {"debug_mode": enable, "message": f"Debug mode {'enabled' if enable else 'disabled'}"}
+
+    @app.post("/api/monitoring")
+    async def toggle_monitoring(enable: bool):
+        """Toggle task monitoring globally"""
+        task_monitor = get_task_monitor()
+        task_monitor.set_global_monitoring(enable)
+        
+        logger.info(f"[API] POST /api/monitoring - Task monitoring {'enabled' if enable else 'disabled'}")
+        return {"monitoring_enabled": enable, "message": f"Task monitoring {'enabled' if enable else 'disabled'}"}
+    
+    @app.get("/api/monitoring")
+    async def get_monitoring_status():
+        """Get task monitoring status and statistics"""
+        task_monitor = get_task_monitor()
+        stats = task_monitor.get_monitoring_stats()
+        
+        logger.info(f"[API] GET /api/monitoring - Retrieved monitoring stats")
+        return {
+            "monitoring": stats,
+            "message": f"Monitoring {'enabled' if stats['monitoring_enabled'] else 'disabled'} for {stats['session_count']} sessions"
+        }
+    
+    @app.post("/api/monitoring/test")
+    async def test_monitoring():
+        """Test the monitoring system with sample responses"""
+        from monitor import test_monitor
+        
+        try:
+            monitor = test_monitor()
+            logger.info("[API] POST /api/monitoring/test - Monitoring test completed")
+            return {
+                "status": "success",
+                "message": "Monitoring test completed - check server logs for results",
+                "monitoring_enabled": monitor.monitoring_enabled,
+                "monitored_sessions": list(monitor.monitored_sessions)
+            }
+        except Exception as e:
+            logger.error(f"[API] POST /api/monitoring/test - Test failed: {e}")
+            return {
+                "status": "error", 
+                "message": f"Test failed: {e}"
+            }
 
     return app

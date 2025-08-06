@@ -177,6 +177,7 @@ When modifying this agent:
 - `core.py`: Core business logic and chat session management
 - `web.py`: Web interface, API endpoints, and WebSocket handling  
 - `models.py`: Data models, logging configuration, and config management
+- `monitor.py`: Task monitoring and auto-prompting system
 - `config.json`: All application configuration settings
 - `requirements.txt`: Python dependencies
 - `web/index.html`: Web interface
@@ -203,6 +204,7 @@ The application uses `config.json` for all configuration settings, eliminating h
 - **limits**: Message history, buffer sizes, truncation lengths for logging
 - **session**: Session timeout, WebSocket close codes
 - **ui**: Refresh intervals, notification settings
+- **monitoring**: Task monitoring, auto-prompting settings
 
 ### Example Configuration
 
@@ -220,12 +222,48 @@ The application uses `config.json` for all configuration settings, eliminating h
     "working_directory": "../chat",
     "startup_args": ["--mcp"]
   },
+  "monitoring": {
+    "enabled": true,
+    "auto_proceed_prompt": "please proceed",
+    "min_response_length": 10,
+    "broadcast_delay_ms": 100,
+    "max_auto_prompts_per_task": 3
+  },
   "timeouts": {
     "initial_prompt_timeout": 15,
     "message_response_timeout": 30
   }
 }
 ```
+
+## Task Monitoring System
+
+The agent includes an intelligent monitoring system that automatically detects when AI responses don't contain tool calls and prompts the AI to continue working.
+
+### Monitoring Features
+
+- **Auto-Detection**: Automatically identifies responses without `/tool` commands
+- **Smart Prompting**: Sends "[AUTO] please proceed" to nudge AI to use tools
+- **Rate Limiting**: Maximum 3 auto-prompts per scheduled task (configurable)
+- **Session Isolation**: Monitoring and counters are per-session
+- **Clean UI Integration**: System messages appear in purple, right-aligned
+- **Counter Reset**: Each new scheduled task execution gets fresh retry attempts
+
+### Monitoring Workflow
+
+1. **Scheduled task executes** → AI responds
+2. **Monitor detects** → No `/tool` commands in response
+3. **Auto-prompt sent** → "[AUTO] please proceed (1/3)" appears in web UI
+4. **AI processes prompt** → Usually responds with tool calls
+5. **If still no tools** → Repeat up to maximum attempts
+6. **After max attempts** → Stop auto-prompting for this task execution
+
+### Key Components
+
+- **TaskMonitor Class** (`monitor.py`): Core monitoring logic and auto-prompting
+- **Detection Logic**: Scans responses for `/tool` commands on clean lines
+- **Counter Management**: Tracks retry attempts per unique task
+- **WebSocket Integration**: Broadcasts system messages to web interface
 
 ## Installation & Setup
 

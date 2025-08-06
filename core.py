@@ -10,6 +10,7 @@ from typing import Dict, Any, List
 import logging
 
 from models import ScheduledTask, DEBUG_MODE, get_config
+from monitor import get_task_monitor
 
 logger = logging.getLogger("agent")
 
@@ -274,6 +275,7 @@ class TaskScheduler:
         self.scheduled_tasks = {}  # Dictionary: session_id -> [tasks]
         self.scheduler_running = False
         self.chat_manager_ref: Any = None  # Reference to ChatManager for broadcasting
+        self.task_monitor = get_task_monitor()  # Task monitoring instance
         
     async def create_chat_session(self, session_id: str):
         """Create a new chat session for a specific session ID"""
@@ -289,6 +291,9 @@ class TaskScheduler:
             # Initialize task list for this session
             if session_id not in self.scheduled_tasks:
                 self.scheduled_tasks[session_id] = []
+            
+            # Enable task monitoring for this session
+            self.task_monitor.enable_monitoring(session_id)
         
         return success
     
@@ -301,6 +306,9 @@ class TaskScheduler:
             # Clean up scheduled tasks for this session
             if session_id in self.scheduled_tasks:
                 del self.scheduled_tasks[session_id]
+            
+            # Disable task monitoring for this session
+            self.task_monitor.disable_monitoring(session_id)
     
     def get_chat_session(self, session_id: str):
         """Get chat session for a specific session ID"""
@@ -309,15 +317,19 @@ class TaskScheduler:
     async def agent_ask_async(self, session_id: str, question: str, task_type: str = "user"):
         """Direct AI interaction for specific session"""
         _ = task_type  # Parameter kept for API compatibility
-        return await self.send_message(session_id, question)
+        return await self.send_message_to_session(session_id, question)
+
+    async def send_message_to_session(self, session_id: str, message: str):
+        """Send a message directly to a chat session"""
+        session = self.get_chat_session(session_id)
+        if session:
+            return await session.send_message(message)
+        else:
+            return f"Error: No chat session found for {session_id}"
 
     async def send_message(self, session_id: str, message: str):
-        """Send message to chat process and get response"""
-        session = self.chat_sessions.get(session_id)
-        if not session:
-            return f"Error: No chat session found for {session_id}"
-        
-        return await session.send_message(message)
+        """Send message to chat process and get response (deprecated - use send_message_to_session)"""
+        return await self.send_message_to_session(session_id, message)
     
     def agent_ask(self, session_id: str, question: str):
         """Synchronous wrapper for compatibility"""
@@ -443,6 +455,11 @@ class TaskScheduler:
                     # Broadcast scheduled message and response to chat
                     if hasattr(self, 'chat_manager_ref') and self.chat_manager_ref:
                         await self.chat_manager_ref.broadcast_scheduled_message(session_id, message, response)
+                    
+                    # Monitor the response and potentially inject follow-up
+                    await self.task_monitor.monitor_scheduled_response(
+                        session_id, message, response, scheduler_ref=self
+                    )
                 
                 self.task_queue.task_done()
                     

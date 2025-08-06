@@ -56,7 +56,7 @@ class CustomFormatter(logging.Formatter):
 def setup_logging():
     """Configure logging for the agent system"""
     logger = logging.getLogger("agent")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)  # Enable debug logging to see monitor messages
     
     # Remove default handlers
     for handler in logger.handlers[:]:
