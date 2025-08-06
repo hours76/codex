@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Agent Manager</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="main-container">
+        <!-- Left side - Chat -->
+        <div class="chat-container">
+            <div class="header">
+                <h1>Agent Manager</h1>
+            </div>
+            
+            <!-- Chat Tabs -->
+            <div class="chat-tabs">
+                <div class="tab-list" id="tab-list">
+                    <!-- Default tab will be created by JavaScript -->
+                    <button class="add-tab" id="add-tab" onclick="addNewTab()">+</button>
+                </div>
+            </div>
+            
+            <!-- Chat Sessions -->
+            <div class="chat-sessions" id="chat-sessions">
+                <!-- Default session will be created by JavaScript -->
+            </div>
+            
+            <div class="input-area">
+                <input type="text" id="message-input" class="message-input" 
+                       placeholder="Type your message..." disabled>
+                <button id="send-button" class="send-button" disabled>Send</button>
+            </div>
+        </div>
+
+        <!-- Right side - Scheduler -->
+        <div class="scheduler-sidebar">
+            <div class="scheduler-header">
+                <h2>Scheduler</h2>
+            </div>
+            
+            <!-- Schedule new task -->
+            <div class="schedule-form">
+                <h3>Add New Task</h3>
+                <div class="form-group">
+                    <label>Schedule:</label>
+                    <input type="text" id="schedule-time" class="form-input" 
+                           placeholder="daily 9:00, every 30min">
+                    <div class="examples">
+                        Examples: <code>daily 9:00</code>, <code>every 30min</code>, <code>2:15pm</code>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Prompt:</label>
+                    <textarea id="schedule-message" class="form-textarea" 
+                              placeholder="Prompt to send..."></textarea>
+                </div>
+                <button id="schedule-button" class="schedule-button">Add Task</button>
+            </div>
+
+            <!-- Scheduled tasks list -->
+            <div class="tasks-section">
+                <div class="tasks-header">
+                    <h3>Scheduled Tasks (<span id="task-count">0</span>)</h3>
+                    <button id="clear-all-tasks" class="clear-button">Clear All</button>
+                </div>
+                <div id="tasks-list" class="tasks-list">
+                    <div class="no-tasks">No scheduled tasks</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>
