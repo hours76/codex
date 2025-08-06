@@ -12,7 +12,7 @@ from datetime import datetime
 import logging
 
 from core import TaskScheduler
-from models import ChatMessage, ScheduleRequest
+from models import ChatMessage, ScheduleRequest, get_config
 
 logger = logging.getLogger("agent")
 
@@ -70,9 +70,10 @@ class ChatManager:
         
         self.chat_history[session_id].append(message)
         
-        # Keep only last 100 messages per session
-        if len(self.chat_history[session_id]) > 100:
-            self.chat_history[session_id] = self.chat_history[session_id][-100:]
+        # Keep only last N messages per session
+        max_history = get_config("limits.max_chat_history_per_session")
+        if len(self.chat_history[session_id]) > max_history:
+            self.chat_history[session_id] = self.chat_history[session_id][-max_history:]
         
         # Send to all connections in this session
         if session_id in self.active_connections:
@@ -158,7 +159,8 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             # Try to parse session_id as timestamp 
             session_timestamp = int(session_id)
             current_time = int(time.time() * 1000)
-            is_recent_session = (current_time - session_timestamp) < 30000  # 30 seconds
+            session_timeout = get_config("session.session_timeout_ms")
+            is_recent_session = (current_time - session_timestamp) < session_timeout
         except ValueError:
             # Not a timestamp-based session ID
             is_recent_session = True  # Allow non-timestamp session IDs
@@ -183,12 +185,14 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 try:
                     message_data = json.loads(data)
                 except json.JSONDecodeError:
-                    logger.warning(f"[WEB] Invalid JSON received from session {session_id}: {data[:16]}...")
+                    truncate_len = get_config("limits.log_data_truncation_length")
+                    logger.warning(f"[WEB] Invalid JSON received from session {session_id}: {data[:truncate_len]}...")
                     continue
                 
                 # Check message structure
                 if not isinstance(message_data, dict) or "type" not in message_data:
-                    logger.warning(f"[WEB] Invalid message structure from session {session_id}: {str(message_data)[:16]}...")
+                    truncate_len = get_config("limits.log_data_truncation_length")
+                    logger.warning(f"[WEB] Invalid message structure from session {session_id}: {str(message_data)[:truncate_len]}...")
                     continue
                 
                 if message_data["type"] == "chat":
@@ -197,7 +201,8 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                         continue
                         
                     user_message = message_data["message"]
-                    logger.info(f"[WEB] User message from session {session_id}: {user_message[:16]}...")
+                    truncate_len = get_config("limits.message_truncation_length")
+                    logger.info(f"[WEB] User message from session {session_id}: {user_message[:truncate_len]}...")
                     
                     # Broadcast user message
                     user_msg = ChatMessage(
@@ -209,7 +214,8 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                     
                     # Get AI response
                     ai_response = await chat_manager.ask_ai(session_id, user_message)
-                    logger.info(f"[WEB] AI response to session {session_id}: {ai_response[:16]}...")
+                    truncate_len = get_config("limits.message_truncation_length")
+                    logger.info(f"[WEB] AI response to session {session_id}: {ai_response[:truncate_len]}...")
                     
                     # Broadcast AI response
                     ai_msg = ChatMessage(
@@ -241,10 +247,12 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 import asyncio
                 asyncio.create_task(scheduler.run_scheduler())
             
-            logger.info(f"[API] POST /api/sessions/{session_id}/schedule - Task scheduled: {request.message[:16]}...")
+            truncate_len = get_config("limits.message_truncation_length")
+            logger.info(f"[API] POST /api/sessions/{session_id}/schedule - Task scheduled: {request.message[:truncate_len]}...")
             return {"status": "scheduled", "message": message}
         else:
-            logger.warning(f"[API] POST /api/sessions/{session_id}/schedule - Failed: {message[:16]}...")
+            truncate_len = get_config("limits.message_truncation_length")
+            logger.warning(f"[API] POST /api/sessions/{session_id}/schedule - Failed: {message[:truncate_len]}...")
             raise HTTPException(status_code=400, detail=message)
 
     @app.get("/api/sessions/{session_id}/tasks")

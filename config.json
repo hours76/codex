@@ -1,0 +1,47 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "log_level": "warning",
+    "access_log": false
+  },
+  "chat_system": {
+    "python_executable": "../chat/venv/bin/python",
+    "script_path": "../chat/chat.py",
+    "working_directory": "../chat",
+    "startup_args": ["--mcp"],
+    "environment": {
+      "PYTHONUNBUFFERED": "1",
+      "PYTHONIOENCODING": "utf-8"
+    }
+  },
+  "timeouts": {
+    "initial_prompt_timeout": 15,
+    "prompt_wait_timeout": 10,
+    "message_response_timeout": 30,
+    "process_termination_timeout": 5,
+    "task_queue_timeout": 1.0,
+    "read_chunk_timeout": 0.1
+  },
+  "limits": {
+    "max_chat_history_per_session": 100,
+    "max_startup_text_display": 100,
+    "max_buffer_size": 100,
+    "message_truncation_length": 16,
+    "log_data_truncation_length": 16
+  },
+  "session": {
+    "session_timeout_ms": 30000,
+    "websocket_close_codes": {
+      "session_rejected": 4004,
+      "connection_failed": 1006
+    }
+  },
+  "ui": {
+    "task_refresh_interval_ms": 30000,
+    "task_load_delay_ms": 1000,
+    "notification_duration_ms": 4000,
+    "max_notification_width": 300,
+    "notification_z_index": 1000
+  }
+}

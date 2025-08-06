@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List
 import logging
 
-from models import ScheduledTask, DEBUG_MODE
+from models import ScheduledTask, DEBUG_MODE, get_config
 
 logger = logging.getLogger("agent")
 
@@ -26,18 +26,32 @@ class ChatSession:
         """Start the chat subprocess"""
         try:
             # Create subprocess with pipes for communication
+            # Get configuration
+            python_exec = get_config("chat_system.python_executable")
+            script_path = get_config("chat_system.script_path")
+            working_dir = get_config("chat_system.working_directory")
+            startup_args = get_config("chat_system.startup_args")
+            env_vars = get_config("chat_system.environment")
+            
+            # Prepare command arguments
+            cmd_args = [python_exec, '-u', script_path] + startup_args
+            
+            # Prepare environment variables
+            env = {**os.environ, **env_vars}
+            
             self.process = await asyncio.create_subprocess_exec(
-                '../rag/venv/bin/python', '-u', '../rag/chat.py', '--mcp',
+                *cmd_args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd='../rag',
-                env={**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'}
+                cwd=working_dir,
+                env=env
             )
             
             # Wait for initial prompt
             try:
-                await self._wait_for_prompt(timeout=15)
+                initial_timeout = get_config("timeouts.initial_prompt_timeout")
+                await self._wait_for_prompt(timeout=initial_timeout)
             except asyncio.TimeoutError:
                 logger.error(f"Timeout waiting for initial prompt from chat session {self.session_id}")
                 await self.close()
@@ -52,8 +66,11 @@ class ChatSession:
             logger.error(f"Failed to create chat session {self.session_id}: {e}")
             return False
     
-    async def _wait_for_prompt(self, timeout: float = 10):
+    async def _wait_for_prompt(self, timeout: float = None):
         """Wait for the '> ' prompt from the chat process, consuming startup messages"""
+        if timeout is None:
+            timeout = get_config("timeouts.prompt_wait_timeout")
+        
         if not self.process:
             raise Exception(f"No process for session {self.session_id}")
         
@@ -66,7 +83,8 @@ class ChatSession:
             
             while True:
                 try:
-                    chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=0.1)
+                    chunk_timeout = get_config("timeouts.read_chunk_timeout")
+                    chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=chunk_timeout)
                     if not chunk:
                         if self.process.returncode is not None:
                             raise Exception(f"Process exited with code {self.process.returncode}")
@@ -107,10 +125,13 @@ class ChatSession:
         if self.debug_mode:
             # Log startup messages for debugging
             startup_text = result.decode('utf-8', errors='ignore')
-            if len(startup_text) > 100:
-                logger.debug(f"[DEBUG] Startup messages from {self.session_id}: {startup_text[:16]}...")
+            max_display = get_config("limits.max_startup_text_display")
+            if len(startup_text) > max_display:
+                truncate_len = get_config("limits.message_truncation_length")
+                logger.debug(f"[DEBUG] Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
             else:
-                logger.debug(f"[DEBUG] Startup messages from {self.session_id}: {startup_text[:16]}...")
+                truncate_len = get_config("limits.message_truncation_length")
+                logger.debug(f"[DEBUG] Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
         
         return result
     
@@ -130,7 +151,8 @@ class ChatSession:
                 buffer = b''
                 
                 while True:
-                    chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=30)
+                    msg_timeout = get_config("timeouts.message_response_timeout")
+                    chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=msg_timeout)
                     if not chunk:
                         if self.process.returncode is not None:
                             return f"Error: Process exited with code {self.process.returncode}"
@@ -149,8 +171,9 @@ class ChatSession:
                         break
                     
                     # Keep buffer size limited
-                    if len(buffer) > 100:
-                        buffer = buffer[-100:]
+                    max_buffer = get_config("limits.max_buffer_size")
+                    if len(buffer) > max_buffer:
+                        buffer = buffer[-max_buffer:]
                 
                 # Decode and clean response
                 text = response.decode('utf-8', errors='ignore')
@@ -190,17 +213,31 @@ class ChatSession:
         # Create new process
         try:
             import os
+            # Get configuration
+            python_exec = get_config("chat_system.python_executable")
+            script_path = get_config("chat_system.script_path")
+            working_dir = get_config("chat_system.working_directory")
+            startup_args = get_config("chat_system.startup_args")
+            env_vars = get_config("chat_system.environment")
+            
+            # Prepare command arguments
+            cmd_args = [python_exec, '-u', script_path] + startup_args
+            
+            # Prepare environment variables
+            env = {**os.environ, **env_vars}
+            
             self.process = await asyncio.create_subprocess_exec(
-                '../rag/venv/bin/python', '-u', '../rag/chat.py', '--mcp',
+                *cmd_args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd='../rag',
-                env={**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'}
+                cwd=working_dir,
+                env=env
             )
             
             # Wait for initial prompt
-            await self._wait_for_prompt(timeout=15)
+            restart_timeout = get_config("timeouts.initial_prompt_timeout")
+            await self._wait_for_prompt(timeout=restart_timeout)
             logger.info(f"[DEBUG] Chat session {self.session_id} restarted successfully")
             
         except Exception as e:
@@ -214,7 +251,8 @@ class ChatSession:
                 # Terminate the process
                 self.process.terminate()
                 try:
-                    await asyncio.wait_for(self.process.wait(), timeout=5)
+                    term_timeout = get_config("timeouts.process_termination_timeout")
+                    await asyncio.wait_for(self.process.wait(), timeout=term_timeout)
                 except asyncio.TimeoutError:
                     self.process.kill()
                     await self.process.wait()
@@ -372,7 +410,8 @@ class TaskScheduler:
                 task_info['next_run'] = target_time
             
             self.scheduled_tasks[session_id].append(task_info)
-            logger.info(f"[TASK] Task scheduled for session {session_id}: '{message[:16]}...' at {schedule_spec}")
+            truncate_len = get_config("limits.message_truncation_length")
+            logger.info(f"[TASK] Task scheduled for session {session_id}: '{message[:truncate_len]}...' at {schedule_spec}")
             return True, f"Scheduled for session {session_id}: '{message}' at {schedule_spec}"
             
         except Exception as e:
@@ -392,12 +431,14 @@ class TaskScheduler:
         while self.running:
             try:
                 # Wait for a task with timeout to prevent blocking
-                task = await asyncio.wait_for(self.task_queue.get(), timeout=1.0)
+                queue_timeout = get_config("timeouts.task_queue_timeout")
+                task = await asyncio.wait_for(self.task_queue.get(), timeout=queue_timeout)
                 task_type, session_id, message = task
                 
                 if task_type == 'scheduled':
                     response = await self.agent_ask_async(session_id, message, "scheduled")
-                    logger.info(f"[TASK] Scheduled prompt sent to session {session_id}: {message[:16]}...")
+                    truncate_len = get_config("limits.message_truncation_length")
+                    logger.info(f"[TASK] Scheduled prompt sent to session {session_id}: {message[:truncate_len]}...")
                     
                     # Broadcast scheduled message and response to chat
                     if hasattr(self, 'chat_manager_ref') and self.chat_manager_ref:

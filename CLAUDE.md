@@ -84,7 +84,8 @@ The application is organized into separate modules for better maintainability:
 4. **`models.py`**: Data models and utilities
    - Pydantic models for API requests/responses
    - Custom logging formatter with message truncation
-   - Shared configuration and constants
+   - Configuration management with JSON loading and caching
+   - Dot-notation config access (e.g., `get_config("server.host")`)
 
 ### Key Implementation Details
 
@@ -175,7 +176,8 @@ When modifying this agent:
 - `agent.py`: Main entry point (69 lines)
 - `core.py`: Core business logic and chat session management
 - `web.py`: Web interface, API endpoints, and WebSocket handling  
-- `models.py`: Data models and logging configuration
+- `models.py`: Data models, logging configuration, and config management
+- `config.json`: All application configuration settings
 - `requirements.txt`: Python dependencies
 - `web/index.html`: Web interface
 - `web/static/`: CSS and JavaScript assets
@@ -188,6 +190,42 @@ All API endpoints and chat operations are logged with:
 - **Message truncation**: All user input truncated to 16 characters for clean logs
 - **Custom formatting**: Structured logging with prefixes ([API], [WEB], [TASK], etc.)
 - **Debug support**: Configurable debug mode via `/api/debug` endpoint
+
+## Configuration
+
+The application uses `config.json` for all configuration settings, eliminating hardcoded values throughout the codebase.
+
+### Configuration Sections
+
+- **server**: Host, port, logging levels
+- **chat_system**: Python executable paths, script locations, environment variables
+- **timeouts**: All timeout values (prompt, message, process termination, etc.)
+- **limits**: Message history, buffer sizes, truncation lengths for logging
+- **session**: Session timeout, WebSocket close codes
+- **ui**: Refresh intervals, notification settings
+
+### Example Configuration
+
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "log_level": "warning",
+    "access_log": false
+  },
+  "chat_system": {
+    "python_executable": "../chat/venv/bin/python",
+    "script_path": "../chat/chat.py",
+    "working_directory": "../chat",
+    "startup_args": ["--mcp"]
+  },
+  "timeouts": {
+    "initial_prompt_timeout": 15,
+    "message_response_timeout": 30
+  }
+}
+```
 
 ## Installation & Setup
 
@@ -205,6 +243,9 @@ venv\Scripts\activate     # On Windows
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Configure the application (edit config.json as needed)
+# Default config.json is included
 
 # Run the application
 python agent.py

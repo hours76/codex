@@ -4,9 +4,11 @@ Data models and utility functions for the agent system
 
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
 import sys
+import json
+import os
 
 # Pydantic Models
 class ChatMessage(BaseModel):
@@ -71,6 +73,44 @@ def setup_logging():
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
     
     return logger
+
+# Configuration Management
+_config_cache = None
+
+def load_config(config_path: str = "config.json") -> Dict[str, Any]:
+    """Load configuration from JSON file with caching"""
+    global _config_cache
+    
+    if _config_cache is not None:
+        return _config_cache
+    
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    
+    try:
+        with open(config_path, 'r') as f:
+            _config_cache = json.load(f)
+        return _config_cache
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in configuration file: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Error loading configuration: {e}")
+
+def get_config(key_path: str, default: Any = None) -> Any:
+    """Get configuration value using dot notation (e.g., 'server.host')"""
+    config = load_config()
+    
+    keys = key_path.split('.')
+    value = config
+    
+    try:
+        for key in keys:
+            value = value[key]
+        return value
+    except (KeyError, TypeError):
+        if default is not None:
+            return default
+        raise KeyError(f"Configuration key not found: {key_path}")
 
 # Global debug mode flag
 DEBUG_MODE = False

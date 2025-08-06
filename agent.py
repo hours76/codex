@@ -11,7 +11,7 @@ from uvicorn.config import LOGGING_CONFIG
 
 from core import TaskScheduler
 from web import ChatManager, create_app
-from models import setup_logging
+from models import setup_logging, get_config
 
 def main():
     """Main entry point for the agent system"""
@@ -19,7 +19,11 @@ def main():
     # Setup logging
     logger = setup_logging()
     logger.info("Starting Agent Manager...")
-    logger.info("Web Interface: http://127.0.0.1:8000")
+    
+    # Load configuration
+    host = get_config("server.host")
+    port = get_config("server.port")
+    logger.info(f"Web Interface: http://{host}:{port}")
     logger.info("Press Ctrl+C to stop")
     
     # Initialize components
@@ -55,14 +59,14 @@ def main():
     log_config["formatters"]["default"]["fmt"] = "[WEB] %(message)s"
     log_config["formatters"]["access"]["fmt"] = "[WEB] %(message)s"
     
-    # Start the server
+    # Start the server with configuration
     uvicorn.run(
         app, 
-        host="127.0.0.1", 
-        port=8000,
+        host=host, 
+        port=port,
         log_config=log_config,
-        access_log=False,
-        log_level="warning"
+        access_log=get_config("server.access_log"),
+        log_level=get_config("server.log_level")
     )
 
 if __name__ == "__main__":
