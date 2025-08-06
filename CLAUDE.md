@@ -15,12 +15,16 @@ Interactive Agent Console - A comprehensive web-based and API-driven agent syste
 
 ## Dependencies
 
+### Installation
+```bash
+pip install -r requirements.txt
+```
+
 ### Required Libraries
-- `fastapi`: Web framework for REST API endpoints
-- `uvicorn`: ASGI server for running FastAPI applications
-- `pydantic`: Data validation and settings management
-- `asyncio`: Async task management, subprocess control, and scheduling
-- `textual`: TUI framework (legacy, maintained for compatibility)
+- `fastapi>=0.104.0`: Web framework for REST API endpoints
+- `uvicorn[standard]>=0.24.0`: ASGI server for running FastAPI applications
+- `pydantic>=2.0.0`: Data validation and settings management
+- `textual>=0.60.0`: TUI framework (legacy, maintained for compatibility)
 
 ### Chat System Integration
 The agent depends on the chat system in `../rag/chat.py` which requires:
@@ -54,31 +58,33 @@ Project includes `.vscode/settings.json` with Python interpreter path:
 }
 ```
 
-### Testing
-- `test_subprocess.py`: Test script for subprocess communication with chat.py
-- Run: `./venv/bin/python test_subprocess.py`
-
 ## Code Architecture
 
-### Main Components
+### Modular Structure
 
-1. **TaskScheduler Class** (`agent.py:84-522`): Core business logic
-   - Chat session management with subprocess.PIPE
-   - Async lock-based conversation serialization per session
-   - Scheduled task system with interval/daily support per session
-   - Smart task queue processing with session isolation
+The application is organized into separate modules for better maintainability:
 
-2. **ChatManager Class** (`agent.py:524-643`): WebSocket and session management
-   - Multi-session WebSocket connection handling
-   - Chat history management per session
+1. **`agent.py`** (69 lines): Main entry point
+   - Application startup and configuration
+   - FastAPI app creation with lifespan management
+   - Component initialization and cross-references
+
+2. **`core.py`**: Core business logic
+   - **ChatSession Class**: Individual chat subprocess management
+   - **TaskScheduler Class**: Multi-session task scheduling and chat session management
+   - Subprocess IPC with asyncio.PIPE
+   - Automatic process restart on timeout
+
+3. **`web.py`**: Web interface and API endpoints
+   - **ChatManager Class**: WebSocket and session management
+   - FastAPI route definitions with comprehensive logging
+   - Session recovery and cleanup
    - Real-time message broadcasting
-   - Session recovery and persistence
 
-3. **FastAPI Web Server** (`agent.py:645-927`): Web interface and API
-   - REST API endpoints for session management
-   - WebSocket endpoints for real-time communication
-   - Static file serving for web interface
-   - Task scheduling API endpoints
+4. **`models.py`**: Data models and utilities
+   - Pydantic models for API requests/responses
+   - Custom logging formatter with message truncation
+   - Shared configuration and constants
 
 ### Key Implementation Details
 
@@ -88,6 +94,7 @@ Project includes `.vscode/settings.json` with Python interpreter path:
 - **Startup handling**: Proper consumption of chat.py startup messages before first interaction
 - **Echo removal**: Smart filtering of input message echoes from responses
 - **Process management**: Graceful termination with timeout and force-kill fallback
+- **Auto-restart**: Automatic process restart on timeout with comprehensive logging
 
 #### MCP Integration (Transparent Pass-through)
 - **No direct MCP code**: Agent passes `--mcp` flag to chat.py subprocess
@@ -165,11 +172,43 @@ When modifying this agent:
 - **WebSocket stability**: Handle connection drops and reconnections gracefully
 
 ### Key Files
-- `agent.py`: Main application (927 lines)
+- `agent.py`: Main entry point (69 lines)
+- `core.py`: Core business logic and chat session management
+- `web.py`: Web interface, API endpoints, and WebSocket handling  
+- `models.py`: Data models and logging configuration
+- `requirements.txt`: Python dependencies
 - `web/index.html`: Web interface
 - `web/static/`: CSS and JavaScript assets
-- `test_subprocess.py`: Communication testing
 - `.vscode/settings.json`: VS Code Python interpreter configuration
 
-### No Build Process
-This is a single-file FastAPI application with no build process. Dependencies are managed via pip in the virtual environment.
+## Logging
+
+All API endpoints and chat operations are logged with:
+- **Comprehensive coverage**: Every API call, WebSocket message, and scheduled task
+- **Message truncation**: All user input truncated to 16 characters for clean logs
+- **Custom formatting**: Structured logging with prefixes ([API], [WEB], [TASK], etc.)
+- **Debug support**: Configurable debug mode via `/api/debug` endpoint
+
+## Installation & Setup
+
+```bash
+# Clone/navigate to project directory
+cd /Users/hrsung/Documents/work/ai/agent
+
+# Create virtual environment
+python -m venv venv
+
+# Activate virtual environment
+source venv/bin/activate  # On macOS/Linux
+# or
+venv\Scripts\activate     # On Windows
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the application
+python agent.py
+```
+
+### Build Process
+This is a modular FastAPI application with no build process required. Dependencies are managed via pip and requirements.txt.

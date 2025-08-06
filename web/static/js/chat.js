@@ -310,7 +310,7 @@ function sendMessage() {
     const activeSession = sessions[activeSessionId];
     
     if (message && activeSession && activeSession.websocket && activeSession.websocket.readyState === WebSocket.OPEN) {
-        activeSession.websocket.send(message);
+        activeSession.websocket.send(JSON.stringify({type: "chat", message: message}));
         messageInput.value = '';
     } else {
         showNotification('Not connected to chat session', 'error');
@@ -455,7 +455,7 @@ async function scheduleTask() {
     }
     
     try {
-        const response = await fetch(`/api/sessions/${activeSessionId}/tasks`, {
+        const response = await fetch(`/api/sessions/${activeSessionId}/schedule`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
