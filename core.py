@@ -6,10 +6,10 @@ import asyncio
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any
 import logging
 
-from models import ScheduledTask, DEBUG_MODE, get_config
+from models import DEBUG_MODE, get_config
 from monitor import get_task_monitor
 
 logger = logging.getLogger("agent")
@@ -58,8 +58,8 @@ class ChatSession:
                 await self.close()
                 return False
             
-            if self.debug_mode:
-                logger.debug(f"[DEBUG] Chat session {self.session_id} spawned, PID: {self.process.pid}")
+            if self.debug_mode and self.process:
+                logger.debug(f"Chat session {self.session_id} spawned, PID: {self.process.pid}")
             
             return True
             
@@ -67,7 +67,7 @@ class ChatSession:
             logger.error(f"Failed to create chat session {self.session_id}: {e}")
             return False
     
-    async def _wait_for_prompt(self, timeout: float = None):
+    async def _wait_for_prompt(self, timeout: float | None = None):
         """Wait for the '> ' prompt from the chat process, consuming startup messages"""
         if timeout is None:
             timeout = get_config("timeouts.prompt_wait_timeout")
@@ -84,10 +84,12 @@ class ChatSession:
             
             while True:
                 try:
+                    if not self.process or not self.process.stdout:
+                        raise Exception(f"Process terminated for session {self.session_id}")
                     chunk_timeout = get_config("timeouts.read_chunk_timeout")
                     chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=chunk_timeout)
                     if not chunk:
-                        if self.process.returncode is not None:
+                        if self.process and self.process.returncode is not None:
                             raise Exception(f"Process exited with code {self.process.returncode}")
                         continue
                     
@@ -129,10 +131,10 @@ class ChatSession:
             max_display = get_config("limits.max_startup_text_display")
             if len(startup_text) > max_display:
                 truncate_len = get_config("limits.message_truncation_length")
-                logger.debug(f"[DEBUG] Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
+                logger.debug(f"Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
             else:
                 truncate_len = get_config("limits.message_truncation_length")
-                logger.debug(f"[DEBUG] Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
+                logger.debug(f"Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
         
         return result
     
@@ -144,6 +146,8 @@ class ChatSession:
         async with self.lock:
             try:
                 # Send message
+                if not self.process or not self.process.stdin:
+                    return f"Error: No active process for session {self.session_id}"
                 self.process.stdin.write(f"{message}\n".encode('utf-8'))
                 await self.process.stdin.drain()
                 
@@ -152,24 +156,36 @@ class ChatSession:
                 buffer = b''
                 
                 while True:
+                    if not self.process or not self.process.stdout:
+                        return f"Error: Process terminated for session {self.session_id}"
                     msg_timeout = get_config("timeouts.message_response_timeout")
                     chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=msg_timeout)
                     if not chunk:
-                        if self.process.returncode is not None:
+                        if self.process and self.process.returncode is not None:
                             return f"Error: Process exited with code {self.process.returncode}"
                         continue
                     
                     buffer += chunk
                     response += chunk
                     
-                    # Check for prompt at end
-                    if buffer.endswith(b'\n> ') or (len(buffer) > 2 and buffer[-3:] == b'\n> '):
-                        # Remove the prompt from response
-                        if response.endswith(b'\n> '):
-                            response = response[:-3]
-                        elif response.endswith(b'> '):
-                            response = response[:-2]
-                        break
+                    # Only check for prompt when we have a complete line ending with "> "
+                    # and haven't received new data for a brief moment (to ensure we're at a real prompt)
+                    if len(buffer) >= 3 and buffer[-3:] == b'\n> ':
+                        # Try to read one more byte with a very short timeout to see if more data is coming
+                        try:
+                            if not self.process or not self.process.stdout:
+                                break
+                            extra = await asyncio.wait_for(self.process.stdout.read(1), timeout=0.1)
+                            if extra:
+                                # More data coming, this wasn't the real prompt
+                                buffer += extra
+                                response += extra
+                                continue
+                        except asyncio.TimeoutError:
+                            # No more data, this is likely the real prompt
+                            if response.endswith(b'\n> '):
+                                response = response[:-3]
+                            break
                     
                     # Keep buffer size limited
                     max_buffer = get_config("limits.max_buffer_size")
@@ -199,7 +215,7 @@ class ChatSession:
                 return text
                 
             except asyncio.TimeoutError:
-                logger.warning(f"[DEBUG] Timeout in send_message for session {self.session_id}, attempting to restart process")
+                logger.warning(f"Timeout in send_message for session {self.session_id}, attempting to restart process")
                 # Try to restart the process
                 await self.restart_process()
                 return "Error: Timeout waiting for response - process restarted"
@@ -239,7 +255,7 @@ class ChatSession:
             # Wait for initial prompt
             restart_timeout = get_config("timeouts.initial_prompt_timeout")
             await self._wait_for_prompt(timeout=restart_timeout)
-            logger.info(f"[DEBUG] Chat session {self.session_id} restarted successfully")
+            logger.info(f"Chat session {self.session_id} restarted successfully")
             
         except Exception as e:
             logger.error(f"Failed to restart chat session {self.session_id}: {e}")
@@ -292,8 +308,9 @@ class TaskScheduler:
             if session_id not in self.scheduled_tasks:
                 self.scheduled_tasks[session_id] = []
             
-            # Enable task monitoring for this session
-            self.task_monitor.enable_monitoring(session_id)
+            # Enable task monitoring for this session if globally enabled
+            if get_config("monitoring.enabled"):
+                self.task_monitor.enable_monitoring(session_id)
         
         return success
     
@@ -423,7 +440,6 @@ class TaskScheduler:
             
             self.scheduled_tasks[session_id].append(task_info)
             truncate_len = get_config("limits.message_truncation_length")
-            logger.info(f"[TASK] Task scheduled for session {session_id}: '{message[:truncate_len]}...' at {schedule_spec}")
             return True, f"Scheduled for session {session_id}: '{message}' at {schedule_spec}"
             
         except Exception as e:
@@ -448,13 +464,19 @@ class TaskScheduler:
                 task_type, session_id, message = task
                 
                 if task_type == 'scheduled':
-                    response = await self.agent_ask_async(session_id, message, "scheduled")
-                    truncate_len = get_config("limits.message_truncation_length")
-                    logger.info(f"[TASK] Scheduled prompt sent to session {session_id}: {message[:truncate_len]}...")
-                    
-                    # Broadcast scheduled message and response to chat
+                    # First, broadcast the scheduled message immediately
                     if hasattr(self, 'chat_manager_ref') and self.chat_manager_ref:
-                        await self.chat_manager_ref.broadcast_scheduled_message(session_id, message, response)
+                        await self.chat_manager_ref.broadcast_scheduled_question(session_id, message)
+                    
+                    truncate_len = get_config("limits.message_truncation_length")
+                    logger.info(f"Scheduled prompt sent to session {session_id}: {message[:truncate_len]}...")
+                    
+                    # Then get the AI response (this takes time)
+                    response = await self.agent_ask_async(session_id, message, "scheduled")
+                    
+                    # Finally, broadcast the response when received
+                    if hasattr(self, 'chat_manager_ref') and self.chat_manager_ref:
+                        await self.chat_manager_ref.broadcast_ai_response(session_id, response)
                     
                     # Monitor the response and potentially inject follow-up
                     await self.task_monitor.monitor_scheduled_response(
@@ -467,7 +489,7 @@ class TaskScheduler:
                 # No task available, continue loop
                 continue
             except Exception as e:
-                logger.error(f"[TASK] Task queue error: {e}")
+                logger.error(f"Task queue error: {e}")
                 try:
                     if self.task_queue:
                         self.task_queue.task_done()
@@ -478,7 +500,7 @@ class TaskScheduler:
     
     async def run_scheduler(self):
         """Run the scheduler in background for all sessions"""
-        logger.info("[TASK] Scheduler started")
+        logger.info("Scheduler started")
         while self.scheduler_running and self.running:
             now = datetime.now()
             
@@ -502,7 +524,7 @@ class TaskScheduler:
                         task['last_run'] = now
             
             await asyncio.sleep(1)
-        logger.info("[TASK] Scheduler stopped")
+        logger.info("Scheduler stopped")
     
     async def _execute_scheduled_task(self, task):
         """Execute a scheduled task for specific session and clear the running flag when done"""
@@ -510,7 +532,7 @@ class TaskScheduler:
             session_id = task['session_id']
             await self.scheduled_message_for_session(session_id, task['message'])
         except Exception as e:
-            logger.error(f"[TASK] Task execution error: {e}")
+            logger.error(f"Task execution error: {e}")
         finally:
             task['is_running'] = False
 

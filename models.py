@@ -30,28 +30,26 @@ class ScheduledTask(BaseModel):
 # Logging Utilities
 class CustomFormatter(logging.Formatter):
     def format(self, record):
+        # Get timestamp with explicit zero-padding
+        import datetime
+        dt = datetime.datetime.fromtimestamp(record.created)
+        timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
+        
         # Ensure we have the message attribute
         if not hasattr(record, 'message'):
             record.message = record.getMessage()
             
-        # Check if message has a custom prefix
         msg = record.message
-        if msg.startswith('[USER]') or msg.startswith('[AI]') or msg.startswith('[API]') or \
-           msg.startswith('[TASK]') or msg.startswith('[AGENT]') or msg.startswith('[DEBUG]') or \
-           msg.startswith('[WEB]') or msg.startswith('[WARN]') or msg.startswith('[ERROR]'):
-            # Keep the custom prefix, remove the level name
-            return msg
         
-        # Default formatting for other logs
-        if record.levelname == 'INFO':
-            return f'[WEB] {msg}'
-        elif record.levelname == 'ERROR':
-            return f'[ERROR] {msg}'
-        elif record.levelname == 'WARNING':
-            return f'[WARN] {msg}'
-        elif record.levelname == 'DEBUG':
-            return f'[DEBUG] {msg}'
-        return msg
+        # Remove any existing prefixes from the message
+        prefixes = ['[USER]', '[AI]', '[API]', '[TASK]', '[AGENT]', '[DEBUG]', '[WEB]', '[WARN]', '[ERROR]', '[MONITOR]']
+        for prefix in prefixes:
+            if msg.startswith(prefix):
+                msg = msg[len(prefix):].strip()
+                break
+        
+        # Return just timestamp and clean message
+        return f'[{timestamp}] {msg}'
 
 def setup_logging():
     """Configure logging for the agent system"""

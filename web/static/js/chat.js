@@ -286,6 +286,14 @@ function addMessageToSession(sessionId, message) {
     // Format message with proper line breaks and structure
     let formattedMessage = message.message;
     
+    // Escape HTML entities to prevent tags from being interpreted
+    formattedMessage = formattedMessage
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    
     // Convert newlines to HTML line breaks for better formatting
     formattedMessage = formattedMessage.replace(/\n/g, '<br>');
     

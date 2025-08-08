@@ -89,17 +89,17 @@ class ChatManager:
         """Send question to AI and get response for specific session"""
         return await self.scheduler.agent_ask_async(session_id, question, "user")
     
-    async def broadcast_scheduled_message(self, session_id: str, question: str, response: str):
-        """Broadcast scheduled message and response to specific session"""
-        # Broadcast the scheduled question
+    async def broadcast_scheduled_question(self, session_id: str, question: str):
+        """Broadcast scheduled question to specific session"""
         scheduled_message = ChatMessage(
             message=f"[SCHEDULED] {question}",
             timestamp=datetime.now().isoformat(),
             sender="scheduled"
         )
         await self.broadcast_to_session(session_id, scheduled_message)
-        
-        # Broadcast the AI response
+    
+    async def broadcast_ai_response(self, session_id: str, response: str):
+        """Broadcast AI response to specific session"""
         if response:
             ai_message = ChatMessage(
                 message=response,
@@ -107,6 +107,11 @@ class ChatManager:
                 sender="ai"
             )
             await self.broadcast_to_session(session_id, ai_message)
+    
+    async def broadcast_scheduled_message(self, session_id: str, question: str, response: str):
+        """Broadcast scheduled message and response to specific session (legacy method)"""
+        await self.broadcast_scheduled_question(session_id, question)
+        await self.broadcast_ai_response(session_id, response)
     
     def get_active_sessions(self):
         """Get list of active session IDs"""
@@ -168,7 +173,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             
         # Only accept sessions that have data or are recent
         if not has_meaningful_data and not is_recent_session:
-            logger.info(f"[WEB] Rejecting connection to old empty session {session_id}")
+            logger.info(f"Rejecting connection to old empty session {session_id}")
             await websocket.close(code=4004, reason="Session too old and empty")
             return
         
@@ -187,23 +192,23 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                     message_data = json.loads(data)
                 except json.JSONDecodeError:
                     truncate_len = get_config("limits.log_data_truncation_length")
-                    logger.warning(f"[WEB] Invalid JSON received from session {session_id}: {data[:truncate_len]}...")
+                    logger.warning(f"Invalid JSON received from session {session_id}: {data[:truncate_len]}...")
                     continue
                 
                 # Check message structure
                 if not isinstance(message_data, dict) or "type" not in message_data:
                     truncate_len = get_config("limits.log_data_truncation_length")
-                    logger.warning(f"[WEB] Invalid message structure from session {session_id}: {str(message_data)[:truncate_len]}...")
+                    logger.warning(f"Invalid message structure from session {session_id}: {str(message_data)[:truncate_len]}...")
                     continue
                 
                 if message_data["type"] == "chat":
                     if "message" not in message_data:
-                        logger.warning(f"[WEB] Chat message missing 'message' field from session {session_id}")
+                        logger.warning(f"Chat message missing 'message' field from session {session_id}")
                         continue
                         
                     user_message = message_data["message"]
                     truncate_len = get_config("limits.message_truncation_length")
-                    logger.info(f"[WEB] User message from session {session_id}: {user_message[:truncate_len]}...")
+                    logger.info(f"User message from session {session_id}: {user_message[:truncate_len]}...")
                     
                     # Broadcast user message
                     user_msg = ChatMessage(
@@ -216,7 +221,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                     # Get AI response
                     ai_response = await chat_manager.ask_ai(session_id, user_message)
                     truncate_len = get_config("limits.message_truncation_length")
-                    logger.info(f"[WEB] AI response to session {session_id}: {ai_response[:truncate_len]}...")
+                    logger.info(f"AI response to session {session_id}: {ai_response[:truncate_len]}...")
                     
                     # Broadcast AI response
                     ai_msg = ChatMessage(
@@ -229,7 +234,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         except WebSocketDisconnect:
             chat_manager.disconnect_session(websocket, session_id)
         except Exception as e:
-            logger.error(f"[WEB] WebSocket error for session {session_id}: {e}")
+            logger.error(f"WebSocket error for session {session_id}: {e}")
             chat_manager.disconnect_session(websocket, session_id)
             try:
                 await websocket.close(code=1011, reason="Internal server error")
@@ -249,32 +254,32 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 asyncio.create_task(scheduler.run_scheduler())
             
             truncate_len = get_config("limits.message_truncation_length")
-            logger.info(f"[API] POST /api/sessions/{session_id}/schedule - Task scheduled: {request.message[:truncate_len]}...")
+            logger.info(f"POST /api/sessions/{session_id}/schedule - Task scheduled")
             return {"status": "scheduled", "message": message}
         else:
             truncate_len = get_config("limits.message_truncation_length")
-            logger.warning(f"[API] POST /api/sessions/{session_id}/schedule - Failed: {message[:truncate_len]}...")
+            logger.warning(f"POST /api/sessions/{session_id}/schedule - Failed: {message[:truncate_len]}...")
             raise HTTPException(status_code=400, detail=message)
 
     @app.get("/api/sessions/{session_id}/tasks")
     async def get_session_tasks(session_id: str):
         """Get scheduled tasks for a specific session"""
         tasks = scheduler.get_scheduled_tasks(session_id)
-        logger.info(f"[API] GET /api/sessions/{session_id}/tasks - Returned {len(tasks)} tasks")
+        logger.info(f"GET /api/sessions/{session_id}/tasks - Returned {len(tasks)} tasks")
         return {"tasks": tasks}
 
     @app.get("/api/tasks")
     async def get_all_tasks():
         """Get all scheduled tasks across all sessions"""
         tasks = scheduler.get_scheduled_tasks()
-        logger.info(f"[API] GET /api/tasks - Returned {len(tasks)} tasks across all sessions")
+        logger.info(f"GET /api/tasks - Returned {len(tasks)} tasks across all sessions")
         return {"tasks": tasks}
 
     @app.delete("/api/sessions/{session_id}/tasks")
     async def clear_session_tasks(session_id: str):
         """Clear all scheduled tasks for a specific session"""
         count = scheduler.clear_scheduled_tasks(session_id)
-        logger.info(f"[API] DELETE /api/sessions/{session_id}/tasks - Cleared {count} tasks")
+        logger.info(f"DELETE /api/sessions/{session_id}/tasks - Cleared {count} tasks")
         return {"cleared": count, "message": f"Cleared {count} tasks for session {session_id}"}
 
     @app.get("/api/sessions/{session_id}")
@@ -282,7 +287,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         """Get status information for a specific session"""
         session_info = chat_manager.get_session_info(session_id)
         
-        logger.info(f"[API] GET /api/sessions/{session_id} - Status: {session_info['history_count']} messages, {session_info['task_count']} tasks")
+        logger.info(f"GET /api/sessions/{session_id} - Status: {session_info['history_count']} messages, {session_info['task_count']} tasks")
         return {
             "session_id": session_id,
             "status": "active" if session_info['is_connected'] else "available",
@@ -302,7 +307,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             "active_websockets": sum(len(conns) for conns in chat_manager.active_connections.values()),
             "available_sessions": chat_manager.get_available_sessions()
         }
-        logger.info(f"[API] GET /api/status - {status['total_sessions']} sessions, {status['active_websockets']} websockets")
+        logger.info(f"GET /api/status - {status['total_sessions']} sessions, {status['active_websockets']} websockets")
         return status
 
     @app.post("/api/sessions/new")
@@ -315,7 +320,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         success = await scheduler.create_chat_session(new_session_id)
         
         if success:
-            logger.info(f"[API] POST /api/sessions/new - Created session {new_session_id}")
+            logger.info(f"POST /api/sessions/new - Created session {new_session_id}")
             return {
                 "session_id": new_session_id,
                 "status": "created",
@@ -335,7 +340,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             info = chat_manager.get_session_info(session_id)
             session_infos.append(info)
         
-        logger.info(f"[API] GET /api/sessions - Returned {len(session_infos)} sessions")
+        logger.info(f"GET /api/sessions - Returned {len(session_infos)} sessions")
         return {"sessions": session_infos}
 
     @app.get("/api/sessions/{session_id}/info")
@@ -350,7 +355,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         
         session_info = chat_manager.get_session_info(session_id)
         
-        logger.info(f"[API] GET /api/sessions/{session_id}/info - Session info retrieved")
+        logger.info(f"GET /api/sessions/{session_id}/info - Session info retrieved")
         return {
             "session_id": session_id,
             "created": True,
@@ -389,7 +394,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                     pass
             del chat_manager.active_connections[session_id]
         
-        logger.info(f"[API] Session {session_id} cleaned up - {cleared_tasks} tasks, {history_count} history entries")
+        logger.info(f"Session {session_id} cleaned up - {cleared_tasks} tasks, {history_count} history entries")
         
         return {
             "session_id": session_id,
@@ -409,7 +414,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         for session in scheduler.chat_sessions.values():
             session.debug_mode = enable
         
-        logger.info(f"[API] POST /api/debug - Debug mode {'enabled' if enable else 'disabled'}")
+        logger.info(f"POST /api/debug - Debug mode {'enabled' if enable else 'disabled'}")
         return {"debug_mode": enable, "message": f"Debug mode {'enabled' if enable else 'disabled'}"}
 
     @app.post("/api/monitoring")
@@ -418,7 +423,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         task_monitor = get_task_monitor()
         task_monitor.set_global_monitoring(enable)
         
-        logger.info(f"[API] POST /api/monitoring - Task monitoring {'enabled' if enable else 'disabled'}")
+        logger.info(f"POST /api/monitoring - Task monitoring {'enabled' if enable else 'disabled'}")
         return {"monitoring_enabled": enable, "message": f"Task monitoring {'enabled' if enable else 'disabled'}"}
     
     @app.get("/api/monitoring")
@@ -427,7 +432,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         task_monitor = get_task_monitor()
         stats = task_monitor.get_monitoring_stats()
         
-        logger.info(f"[API] GET /api/monitoring - Retrieved monitoring stats")
+        logger.info(f"GET /api/monitoring - Retrieved monitoring stats")
         return {
             "monitoring": stats,
             "message": f"Monitoring {'enabled' if stats['monitoring_enabled'] else 'disabled'} for {stats['session_count']} sessions"
@@ -440,7 +445,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         
         try:
             monitor = test_monitor()
-            logger.info("[API] POST /api/monitoring/test - Monitoring test completed")
+            logger.info("POST /api/monitoring/test - Monitoring test completed")
             return {
                 "status": "success",
                 "message": "Monitoring test completed - check server logs for results",
@@ -448,7 +453,7 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 "monitored_sessions": list(monitor.monitored_sessions)
             }
         except Exception as e:
-            logger.error(f"[API] POST /api/monitoring/test - Test failed: {e}")
+            logger.error(f"POST /api/monitoring/test - Test failed: {e}")
             return {
                 "status": "error", 
                 "message": f"Test failed: {e}"

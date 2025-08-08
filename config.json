@@ -16,9 +16,9 @@
     }
   },
   "timeouts": {
-    "initial_prompt_timeout": 15,
+    "initial_prompt_timeout": 60,
     "prompt_wait_timeout": 10,
-    "message_response_timeout": 30,
+    "message_response_timeout": 60,
     "process_termination_timeout": 5,
     "task_queue_timeout": 1.0,
     "read_chunk_timeout": 0.1
@@ -45,7 +45,7 @@
     "notification_z_index": 1000
   },
   "monitoring": {
-    "enabled": true,
+    "enabled": false,
     "auto_proceed_prompt": "please proceed",
     "min_response_length": 10,
     "broadcast_delay_ms": 100,
