@@ -16,9 +16,9 @@
     }
   },
   "timeouts": {
-    "initial_prompt_timeout": 60,
+    "initial_prompt_timeout": 180,
     "prompt_wait_timeout": 10,
-    "message_response_timeout": 60,
+    "message_response_timeout": 180,
     "process_termination_timeout": 5,
     "task_queue_timeout": 1.0,
     "read_chunk_timeout": 0.1

@@ -5,6 +5,7 @@ Core business logic for the agent system
 import asyncio
 import os
 import re
+import signal
 from datetime import datetime, timedelta
 from typing import Dict, Any
 import logging
@@ -46,7 +47,8 @@ class ChatSession:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
-                env=env
+                env=env,
+                preexec_fn=os.setsid  # Create new process group
             )
             
             # Wait for initial prompt
@@ -249,7 +251,8 @@ class ChatSession:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
-                env=env
+                env=env,
+                preexec_fn=os.setsid  # Create new process group
             )
             
             # Wait for initial prompt
@@ -265,13 +268,23 @@ class ChatSession:
         """Close the chat subprocess"""
         if self.process:
             try:
-                # Terminate the process
-                self.process.terminate()
+                # Terminate the entire process group
+                try:
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    # Process group may not exist, fall back to single process
+                    self.process.terminate()
+                
                 try:
                     term_timeout = get_config("timeouts.process_termination_timeout")
                     await asyncio.wait_for(self.process.wait(), timeout=term_timeout)
                 except asyncio.TimeoutError:
-                    self.process.kill()
+                    # Force kill the entire process group
+                    try:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        # Process group may not exist, fall back to single process
+                        self.process.kill()
                     await self.process.wait()
                 
                 logger.info(f"Chat session {self.session_id} closed")
