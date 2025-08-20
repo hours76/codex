@@ -302,6 +302,8 @@ class TaskScheduler:
         self.task_queue = None  # Initialize later when event loop is ready
         self.debug_mode = DEBUG_MODE
         self.scheduled_tasks = {}  # Dictionary: session_id -> [tasks]
+        self.active_plans = {}  # Dictionary: session_id -> plan_name
+        self.plan_usage = {}  # Dictionary: plan_name -> set of session_ids that loaded it
         self.scheduler_running = False
         self.chat_manager_ref: Any = None  # Reference to ChatManager for broadcasting
         self.task_monitor = get_task_monitor()  # Task monitoring instance
@@ -336,6 +338,18 @@ class TaskScheduler:
             # Clean up scheduled tasks for this session
             if session_id in self.scheduled_tasks:
                 del self.scheduled_tasks[session_id]
+            
+            # Clean up active plan for this session
+            if session_id in self.active_plans:
+                plan_name = self.active_plans[session_id]
+                del self.active_plans[session_id]
+                
+                # Remove this session from plan usage tracking
+                if plan_name in self.plan_usage:
+                    self.plan_usage[plan_name].discard(session_id)
+                    # Clean up empty plan usage entries
+                    if not self.plan_usage[plan_name]:
+                        del self.plan_usage[plan_name]
             
             # Disable task monitoring for this session
             self.task_monitor.disable_monitoring(session_id)
@@ -601,3 +615,198 @@ class TaskScheduler:
             self.scheduler_running = False
             
         return count
+    
+    def delete_scheduled_task(self, session_id: str, task_index: int):
+        """Delete a specific scheduled task by index for a session"""
+        if session_id not in self.scheduled_tasks:
+            return False, "Session not found"
+        
+        tasks = self.scheduled_tasks[session_id]
+        if task_index < 0 or task_index >= len(tasks):
+            return False, "Task index out of range"
+        
+        # Remove the task at the specified index
+        deleted_task = tasks.pop(task_index)
+        
+        # Stop scheduler if no tasks remain
+        total_tasks = sum(len(tasks) for tasks in self.scheduled_tasks.values())
+        if total_tasks == 0:
+            self.scheduler_running = False
+        
+        return True, f"Deleted task: {deleted_task['message'][:50]}..."
+    
+    def save_task_plan(self, plan_name: str = None, session_id: str = None):
+        """Save scheduled tasks as a plan to config.json"""
+        import json
+        from datetime import datetime
+        
+        # Generate plan name if not provided
+        if not plan_name:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            plan_name = f"task_plan_{timestamp}"
+        
+        # Collect tasks from specified session or all sessions
+        all_tasks = []
+        seen_tasks = set()  # To avoid duplicates
+        
+        if session_id:
+            # Save tasks from specific session only
+            if session_id in self.scheduled_tasks:
+                for task in self.scheduled_tasks[session_id]:
+                    task_data = {
+                        "message": task["message"],
+                        "schedule_spec": task["schedule_spec"]
+                    }
+                    all_tasks.append(task_data)
+        else:
+            # Save tasks from all sessions (legacy behavior)
+            for session_id, tasks in self.scheduled_tasks.items():
+                for task in tasks:
+                    # Create a unique key for the task to avoid duplicates
+                    task_key = (task["message"], task["schedule_spec"])
+                    if task_key not in seen_tasks:
+                        seen_tasks.add(task_key)
+                        task_data = {
+                            "message": task["message"],
+                            "schedule_spec": task["schedule_spec"]
+                        }
+                        all_tasks.append(task_data)
+        
+        # Create plan data without session IDs
+        plan_data = {
+            "name": plan_name,
+            "created_at": datetime.now().isoformat(),
+            "tasks": all_tasks
+        }
+        
+        # Load current config
+        try:
+            with open("config.json", "r") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            config = {}
+        
+        # Add task_plans section if it doesn't exist
+        if "task_plans" not in config:
+            config["task_plans"] = {}
+        
+        # Save the plan
+        config["task_plans"][plan_name] = plan_data
+        
+        # Write back to config.json
+        try:
+            with open("config.json", "w") as f:
+                json.dump(config, f, indent=2)
+            return True, f"Task plan '{plan_name}' saved successfully"
+        except Exception as e:
+            return False, f"Failed to save task plan: {str(e)}"
+    
+    def load_task_plan(self, plan_name: str, target_session_id: str = None):
+        """Load a saved task plan from config.json and apply it to target session"""
+        import json
+        
+        try:
+            with open("config.json", "r") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            return False, "Config file not found"
+        
+        if "task_plans" not in config or plan_name not in config["task_plans"]:
+            return False, f"Task plan '{plan_name}' not found"
+        
+        plan_data = config["task_plans"][plan_name]
+        loaded_tasks = 0
+        
+        # Clear existing tasks for the target session first
+        if target_session_id:
+            if target_session_id in self.scheduled_tasks:
+                self.scheduled_tasks[target_session_id] = []
+        
+        # Handle both old format (with sessions) and new format (just tasks)
+        if "tasks" in plan_data:
+            # New format - just a list of tasks
+            tasks = plan_data["tasks"]
+        elif "sessions" in plan_data:
+            # Old format - extract tasks from first session
+            # Collect all unique tasks from all sessions
+            all_tasks = []
+            seen_tasks = set()
+            for session_id, session_tasks in plan_data["sessions"].items():
+                for task in session_tasks:
+                    task_key = (task["message"], task["schedule_spec"])
+                    if task_key not in seen_tasks:
+                        seen_tasks.add(task_key)
+                        all_tasks.append(task)
+            tasks = all_tasks
+        else:
+            return False, f"Invalid plan format for '{plan_name}'"
+        
+        # Load tasks to the target session
+        if target_session_id:
+            for task in tasks:
+                success, message = self.schedule_task(
+                    target_session_id, 
+                    task["message"], 
+                    task["schedule_spec"]
+                )
+                if success:
+                    loaded_tasks += 1
+        else:
+            return False, "No target session specified"
+        
+        # Set the active plan for the target session
+        if target_session_id:
+            self.active_plans[target_session_id] = plan_name
+            
+            # Track plan usage - add this session to the plan's usage set
+            if plan_name not in self.plan_usage:
+                self.plan_usage[plan_name] = set()
+            self.plan_usage[plan_name].add(target_session_id)
+        
+        return True, f"Loaded {loaded_tasks} tasks from plan '{plan_name}' to session {target_session_id or 'original sessions'}"
+    
+    def get_saved_task_plans(self):
+        """Get list of all saved task plans from config.json"""
+        import json
+        
+        try:
+            with open("config.json", "r") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            return []
+        
+        if "task_plans" not in config:
+            return []
+        
+        plans = []
+        for plan_name, plan_data in config["task_plans"].items():
+            # Handle both old format (with sessions) and new format (just tasks)
+            if "tasks" in plan_data:
+                # New format
+                total_tasks = len(plan_data["tasks"])
+            elif "sessions" in plan_data:
+                # Old format - count unique tasks
+                seen_tasks = set()
+                for session_tasks in plan_data["sessions"].values():
+                    for task in session_tasks:
+                        task_key = (task["message"], task["schedule_spec"])
+                        seen_tasks.add(task_key)
+                total_tasks = len(seen_tasks)
+            else:
+                total_tasks = 0
+            
+            # Count how many sessions are currently using this plan
+            usage_count = len(self.plan_usage.get(plan_name, set()))
+            
+            plans.append({
+                "name": plan_name,
+                "created_at": plan_data.get("created_at", "Unknown"),
+                "session_count": usage_count,
+                "task_count": total_tasks
+            })
+        
+        return plans
+    
+    def get_active_plan(self, session_id: str):
+        """Get the active plan name for a specific session"""
+        return self.active_plans.get(session_id)

@@ -174,6 +174,7 @@ async function attemptSessionRecovery() {
 // Create a new session when recovery fails
 async function createNewSession() {
     try {
+        
         // Create temporary session ID for immediate UI feedback
         const tempSessionId = Date.now();
         
@@ -374,6 +375,9 @@ function switchToTab(sessionId) {
     // Update active session
     activeSessionId = sessionId;
     
+    // Refresh display to show active plan for this session
+    loadSavedPlans();
+    
     // Update tab appearances
     document.querySelectorAll('.tab').forEach(tab => {
         tab.classList.remove('active');
@@ -543,9 +547,21 @@ async function deleteTask(index) {
     }
     
     try {
-        showNotification('Individual task deletion not yet implemented. Use "Clear All" for now.', 'warning');
+        const response = await fetch(`/api/sessions/${activeSessionId}/tasks/${index}`, {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            showNotification(`Task deleted: ${data.message}`, 'success');
+            loadTasks(); // Refresh the task list
+        } else {
+            const errorData = await response.json();
+            showNotification(`Error deleting task: ${errorData.detail}`, 'error');
+        }
     } catch (error) {
         showNotification('Error deleting task', 'error');
+        console.error('Delete task error:', error);
     }
 }
 
@@ -613,10 +629,222 @@ function showNotification(message, type = 'info') {
     }, 4000);
 }
 
+// Plan management functions
+async function savePlan() {
+    try {
+        // Get the current active plan name to use as default
+        const activeResponse = await fetch(`/api/sessions/${activeSessionId}/active-plan`);
+        let defaultName = '';
+        
+        if (activeResponse.ok) {
+            const activeData = await activeResponse.json();
+            defaultName = activeData.active_plan || '';
+        }
+        
+        const planName = prompt('Enter a name for this task plan:', defaultName);
+        
+        // If user cancelled the prompt or entered empty name, don't save
+        if (planName === null || planName.trim() === '') {
+            return;
+        }
+        
+        const url = `/api/task-plans/save?plan_name=${encodeURIComponent(planName.trim())}&session_id=${activeSessionId}`;
+        const response = await fetch(url, {
+            method: 'POST'
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            showNotification(`${data.message}`, 'success');
+            await loadSavedPlans(); // Refresh the plans list
+        } else {
+            const errorData = await response.json();
+            showNotification(`Error saving plan: ${errorData.detail}`, 'error');
+        }
+    } catch (error) {
+        showNotification('Error saving task plan', 'error');
+        console.error('Save plan error:', error);
+    }
+}
+
+async function refreshPlans() {
+    try {
+        const response = await fetch('/api/task-plans');
+        if (response.ok) {
+            const data = await response.json();
+            
+            if (data.plans.length === 0) {
+                showNotification('No saved plans found', 'info');
+            } else if (data.plans.length === 1) {
+                // If only 1 plan, just show notification
+                showNotification(`Found ${data.plans.length} saved plan`, 'info');
+            } else {
+                // If 2 or more plans, show selection interface
+                showPlanSelectionModal(data.plans);
+            }
+            
+            // Always update the display
+            displayCurrentPlans(data.plans);
+        } else {
+            showNotification('Error loading saved plans', 'error');
+        }
+    } catch (error) {
+        showNotification('Error loading saved plans', 'error');
+        console.error('Load plans error:', error);
+    }
+}
+
+async function loadSavedPlans() {
+    try {
+        const response = await fetch('/api/task-plans');
+        if (response.ok) {
+            const data = await response.json();
+            displayCurrentPlans(data.plans);
+        } else {
+            showNotification('Error loading saved plans', 'error');
+        }
+    } catch (error) {
+        showNotification('Error loading saved plans', 'error');
+        console.error('Load plans error:', error);
+    }
+}
+
+async function displayCurrentPlans(plans) {
+    const currentPlansList = document.getElementById('current-plans-list');
+    
+    try {
+        // Get active plan for current session from server
+        const response = await fetch(`/api/sessions/${activeSessionId}/active-plan`);
+        if (!response.ok) {
+            currentPlansList.innerHTML = '<div class="no-plans">No active plan</div>';
+            return;
+        }
+        
+        const data = await response.json();
+        const activePlanName = data.active_plan;
+        
+        if (!activePlanName) {
+            currentPlansList.innerHTML = '<div class="no-plans">No active plan</div>';
+            return;
+        }
+        
+        // Find the active plan from the plans list
+        const activePlan = plans.find(plan => plan.name === activePlanName);
+        
+        if (!activePlan) {
+            currentPlansList.innerHTML = '<div class="no-plans">Active plan not found</div>';
+            return;
+        }
+        
+        currentPlansList.innerHTML = `
+            <div class="plan-item active-plan">
+                <div class="plan-item-name">${activePlan.name}</div>
+                <div class="plan-item-meta">${activePlan.task_count} tasks, used by ${activePlan.session_count} session${activePlan.session_count !== 1 ? 's' : ''}</div>
+            </div>
+        `;
+    } catch (error) {
+        console.error('Error getting active plan:', error);
+        currentPlansList.innerHTML = '<div class="no-plans">No active plan</div>';
+    }
+}
+
+function showPlanSelectionModal(plans) {
+    // Create modal HTML
+    const modalHtml = `
+        <div id="plan-selection-modal" class="modal-overlay">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Select a Plan to Load</h3>
+                    <button class="modal-close" onclick="closePlanSelectionModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="plan-selection-list">
+                        ${plans.map(plan => `
+                            <div class="selectable-plan-item" onclick="loadSelectedPlan('${plan.name}')">
+                                <div class="plan-item-name">${plan.name}</div>
+                                <div class="plan-item-meta">${plan.task_count} tasks, used by ${plan.session_count} session${plan.session_count !== 1 ? 's' : ''}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Add modal to page
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function closePlanSelectionModal() {
+    const modal = document.getElementById('plan-selection-modal');
+    if (modal) {
+        modal.remove();
+    }
+}
+
+async function loadSelectedPlan(planName) {
+    closePlanSelectionModal();
+    
+    if (!confirm(`Load task plan "${planName}"? This will replace all current tasks.`)) {
+        return;
+    }
+    
+    try {
+        // First verify the session exists on the backend with retries
+        let sessionReady = false;
+        for (let i = 0; i < 3; i++) {
+            const sessionCheck = await fetch(`/api/sessions/${activeSessionId}`);
+            if (sessionCheck.ok) {
+                sessionReady = true;
+                break;
+            }
+            if (i < 2) { // Wait before retry, except on last attempt
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+        
+        if (!sessionReady) {
+            showNotification('Session not ready yet, please wait a moment and try again', 'warning');
+            return;
+        }
+        
+        const response = await fetch(`/api/task-plans/${encodeURIComponent(planName)}/load?session_id=${activeSessionId}`, {
+            method: 'POST'
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            showNotification(`${data.message}`, 'success');
+            
+            // Add a small delay to ensure backend has processed the plan loading
+            setTimeout(async () => {
+                await loadTasks(); // Refresh the task list
+                console.log('Tasks refreshed after loading plan');
+            }, 500);
+            
+            await loadSavedPlans(); // Refresh the display to show active plan
+        } else {
+            const errorData = await response.json();
+            showNotification(`Error loading plan: ${errorData.detail}`, 'error');
+        }
+    } catch (error) {
+        showNotification('Error loading task plan', 'error');
+        console.error('Load plan error:', error);
+    }
+}
+
+
+
 // Event listeners
 sendButton.addEventListener('click', sendMessage);
 scheduleButton.addEventListener('click', scheduleTask);
 clearAllTasksButton.addEventListener('click', clearAllTasks);
+
+// Plan management event listeners
+const savePlanButton = document.getElementById('save-plan-button');
+const loadPlansButton = document.getElementById('load-plans-button');
+savePlanButton.addEventListener('click', savePlan);
+loadPlansButton.addEventListener('click', refreshPlans);
 
 messageInput.addEventListener('keypress', function(e) {
     if (e.key === 'Enter') {
@@ -667,6 +895,9 @@ async function initializePage() {
     
     // Try to recover existing sessions
     await attemptSessionRecovery();
+    
+    // Load saved plans on page initialization
+    await loadSavedPlans();
     
     // If no sessions were recovered, create a new one
     if (Object.keys(sessions).length === 0) {

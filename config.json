@@ -50,5 +50,69 @@
     "min_response_length": 10,
     "broadcast_delay_ms": 100,
     "max_auto_prompts_per_task": 3
+  },
+  "task_plans": {
+    "Monitor": {
+      "name": "Monitor",
+      "created_at": "2025-08-14T17:13:51.463322",
+      "tasks": [
+        {
+          "message": "/clear",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "check current time",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "check new glucose reading in recent 10 min for patient id: steve",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "get message device info by device id: 8e3dea78388b8964",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "if there is new reading, send a message about it to Steve to encourage him to continue, otherwise send a reminder to him.",
+          "schedule_spec": "every 10 min"
+        }
+      ]
+    },
+    "Analysis": {
+      "name": "Analysis",
+      "created_at": "2025-08-14T17:13:47.831097",
+      "tasks": [
+        {
+          "message": "/clear",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "check current time",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "check glucose mesurements of patient id: steve, bill and michael today",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "report which patient is with less measurement today",
+          "schedule_spec": "every 10 min"
+        }
+      ]
+    },
+    "Report": {
+      "name": "Report",
+      "created_at": "2025-08-14T09:36:53.844315",
+      "tasks": [
+        {
+          "message": "/clear",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "check current time",
+          "schedule_spec": "every 10 min"
+        }
+      ]
+    }
   }
 }

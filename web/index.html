@@ -40,33 +40,45 @@
                 <h2>Scheduler</h2>
             </div>
             
-            <!-- Schedule new task -->
-            <div class="schedule-form">
-                <h3>Add New Task</h3>
-                <div class="form-group">
-                    <label>Schedule:</label>
-                    <input type="text" id="schedule-time" class="form-input" 
-                           placeholder="daily 9:00, every 30min">
-                    <div class="examples">
-                        Examples: <code>daily 9:00</code>, <code>every 30min</code>, <code>2:15pm</code>
+            <div class="scheduler-content">
+                <!-- Task Plans section -->
+                <div class="plans-section">
+                    <h3>Task Plans</h3>
+                    <div id="current-plans-list" class="current-plans-list">
+                        <!-- Current plan names will be populated here -->
+                    </div>
+                    <div class="plan-controls">
+                        <button id="save-plan-button" class="schedule-button">Save Plan</button>
+                        <button id="load-plans-button" class="schedule-button">Load Plan</button>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>Prompt:</label>
-                    <textarea id="schedule-message" class="form-textarea" 
-                              placeholder="Prompt to send..."></textarea>
-                </div>
-                <button id="schedule-button" class="schedule-button">Add Task</button>
-            </div>
 
-            <!-- Scheduled tasks list -->
-            <div class="tasks-section">
-                <div class="tasks-header">
-                    <h3>Scheduled Tasks (<span id="task-count">0</span>)</h3>
-                    <button id="clear-all-tasks" class="clear-button">Clear All</button>
+                <!-- Scheduled tasks list -->
+                <div class="tasks-section">
+                    <div class="tasks-header">
+                        <h3>Scheduled Tasks (<span id="task-count">0</span>)</h3>
+                        <button id="clear-all-tasks" class="clear-button">Clear All</button>
+                    </div>
+                    <div id="tasks-list" class="tasks-list">
+                        <div class="no-tasks">No scheduled tasks</div>
+                    </div>
                 </div>
-                <div id="tasks-list" class="tasks-list">
-                    <div class="no-tasks">No scheduled tasks</div>
+
+                <!-- Schedule new task -->
+                <div class="schedule-form">
+                    <hr class="section-divider">
+                    <h3>Add New Task</h3>
+                    <div class="form-group">
+                        <label>Schedule:</label>
+                        <input type="text" id="schedule-time" class="form-input" 
+                               placeholder="daily 9:00, every 30min">
+                    </div>
+                    <div class="form-group">
+                        <label>Prompt:</label>
+                        <textarea id="schedule-message" class="form-textarea" 
+                                  placeholder="Prompt to send..."></textarea>
+                    </div>
+                    <button id="schedule-button" class="schedule-button">Add Task</button>
                 </div>
             </div>
         </div>

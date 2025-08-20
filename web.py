@@ -282,6 +282,18 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         logger.info(f"DELETE /api/sessions/{session_id}/tasks - Cleared {count} tasks")
         return {"cleared": count, "message": f"Cleared {count} tasks for session {session_id}"}
 
+    @app.delete("/api/sessions/{session_id}/tasks/{task_index}")
+    async def delete_single_task(session_id: str, task_index: int):
+        """Delete a specific scheduled task by index for a session"""
+        success, message = scheduler.delete_scheduled_task(session_id, task_index)
+        
+        if success:
+            logger.info(f"DELETE /api/sessions/{session_id}/tasks/{task_index} - {message}")
+            return {"success": True, "message": message}
+        else:
+            logger.warning(f"DELETE /api/sessions/{session_id}/tasks/{task_index} - Failed: {message}")
+            raise HTTPException(status_code=400, detail=message)
+
     @app.get("/api/sessions/{session_id}")
     async def get_session_status(session_id: str):
         """Get status information for a specific session"""
@@ -458,5 +470,49 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 "status": "error", 
                 "message": f"Test failed: {e}"
             }
+
+    @app.post("/api/task-plans/save")
+    async def save_task_plan(plan_name: str = None, session_id: str = None):
+        """Save scheduled tasks as a plan - from specific session if provided"""
+        success, message = scheduler.save_task_plan(plan_name, session_id)
+        
+        if success:
+            logger.info(f"POST /api/task-plans/save - {message}")
+            return {"success": True, "message": message}
+        else:
+            logger.warning(f"POST /api/task-plans/save - Failed: {message}")
+            raise HTTPException(status_code=500, detail=message)
+
+    @app.post("/api/task-plans/{plan_name}/load")
+    async def load_task_plan(plan_name: str, session_id: str = None):
+        """Load a saved task plan and apply it to target session"""
+        success, message = scheduler.load_task_plan(plan_name, session_id)
+        
+        if success:
+            # Start scheduler if not running
+            if not scheduler.scheduler_running:
+                scheduler.scheduler_running = True
+                import asyncio
+                asyncio.create_task(scheduler.run_scheduler())
+            
+            logger.info(f"POST /api/task-plans/{plan_name}/load - {message}")
+            return {"success": True, "message": message}
+        else:
+            logger.warning(f"POST /api/task-plans/{plan_name}/load - Failed: {message}")
+            raise HTTPException(status_code=404, detail=message)
+
+    @app.get("/api/task-plans")
+    async def get_task_plans():
+        """Get list of all saved task plans"""
+        plans = scheduler.get_saved_task_plans()
+        logger.info(f"GET /api/task-plans - Returned {len(plans)} saved plans")
+        return {"plans": plans}
+
+    @app.get("/api/sessions/{session_id}/active-plan")
+    async def get_active_plan(session_id: str):
+        """Get the active plan for a specific session"""
+        active_plan = scheduler.get_active_plan(session_id)
+        logger.info(f"GET /api/sessions/{session_id}/active-plan - Active plan: {active_plan}")
+        return {"active_plan": active_plan}
 
     return app
