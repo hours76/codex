@@ -1,24 +1,23 @@
 {
   "server": {
-    "host": "127.0.0.1",
+    "host": "0.0.0.0",
     "port": 8000,
     "log_level": "warning",
-    "access_log": false
+    "access_log": false,
+    "base_path": "/agent"
   },
-  "chat_system": {
-    "python_executable": "../chat/venv/bin/python",
-    "script_path": "../chat/chat.py",
-    "working_directory": "../chat",
-    "startup_args": ["--mcp"],
-    "environment": {
-      "PYTHONUNBUFFERED": "1",
-      "PYTHONIOENCODING": "utf-8"
-    }
+  "chat_api": {
+    "base_url": "http://localhost:4000/chat",
+    "api_key": "your-api-key-here",
+    "max_retries": 3,
+    "connection_pool_limit": 10,
+    "keepalive_timeout": 30
   },
   "timeouts": {
     "initial_prompt_timeout": 180,
     "prompt_wait_timeout": 10,
     "message_response_timeout": 180,
+    "connect_timeout": 10,
     "process_termination_timeout": 5,
     "task_queue_timeout": 1.0,
     "read_chunk_timeout": 0.1

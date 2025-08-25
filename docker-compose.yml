@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  agent-server:
+    build: .
+    container_name: agent-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    environment:
+      - BASE_PATH=/agent
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - PYTHONIOENCODING=utf-8
+      # Configure chat API endpoint (update as needed for your setup)
+      - CHAT_API_BASE_URL=http://localhost:4000
+      # Optional: API key for chat service
+      # - CHAT_API_KEY=your-api-key-here
+    restart: unless-stopped
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M

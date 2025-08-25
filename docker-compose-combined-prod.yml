@@ -1,0 +1,52 @@
+# Combined production configuration for msg-server, chat-server, and agent-server
+# Usage: docker-compose -f docker-compose-combined-prod.yml up
+
+services:
+  msg-server:
+    image: ghcr.io/hours76/msg-server:latest
+    container_name: msg-server
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - BASE_PATH=/msg
+    volumes:
+      - ./msg-server/data:/app/data
+      - ./msg-server/config:/app/config:ro
+    restart: unless-stopped
+
+  chat-server:
+    image: ghcr.io/hours76/chat-server:latest
+    container_name: chat-server
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./chat-server/config:/app/config:ro
+      - ./chat-server/data:/app/data
+    environment:
+      - BASE_PATH=/chat
+      - PYTHONPATH=/app
+      - FLASK_ENV=production
+      - MSG_SERVER_URL=http://msg-server:3000/msg  # Direct container communication
+    restart: unless-stopped
+    depends_on:
+      - msg-server
+
+  agent-server:
+    image: ghcr.io/hours76/agent-server:latest
+    container_name: agent-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./agent-server/config:/app/config:ro
+      - ./agent-server/data:/app/data
+    environment:
+      - BASE_PATH=/agent
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - PYTHONIOENCODING=utf-8
+      - CHAT_API_BASE_URL=http://chat-server:4000
+    restart: unless-stopped
+    depends_on:
+      - chat-server

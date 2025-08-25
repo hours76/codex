@@ -6,9 +6,13 @@ import asyncio
 import os
 import re
 import signal
+import uuid
+import aiohttp
+import json
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
+from aiohttp import ClientConnectorError, ClientTimeout, ServerTimeoutError
 
 from models import DEBUG_MODE, get_config
 from monitor import get_task_monitor
@@ -16,288 +20,199 @@ from monitor import get_task_monitor
 logger = logging.getLogger("agent")
 
 class ChatSession:
-    """Manages individual chat subprocess communication"""
+    """Manages individual chat session via HTTP API communication"""
     
-    def __init__(self, session_id: str, debug_mode: bool = False):
+    def __init__(self, session_id: str, debug_mode: bool = False, api_session_id: str = None):
         self.session_id = session_id
-        self.process = None
+        self.api_session_id = api_session_id or str(uuid.uuid4())  # Use provided ID or generate new
         self.lock = asyncio.Lock()
         self.debug_mode = debug_mode
+        self.http_session = None
+        self.connection_pool_connector = None
+        self.retry_count = 0
+        self.max_retries = get_config("chat_api.max_retries", 3)
     
     async def start(self):
-        """Start the chat subprocess"""
+        """Start the HTTP session for API communication"""
         try:
-            # Create subprocess with pipes for communication
-            # Get configuration
-            python_exec = get_config("chat_system.python_executable")
-            script_path = get_config("chat_system.script_path")
-            working_dir = get_config("chat_system.working_directory")
-            startup_args = get_config("chat_system.startup_args")
-            env_vars = get_config("chat_system.environment")
-            
-            # Prepare command arguments
-            cmd_args = [python_exec, '-u', script_path] + startup_args
-            
-            # Prepare environment variables
-            env = {**os.environ, **env_vars}
-            
-            self.process = await asyncio.create_subprocess_exec(
-                *cmd_args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-                env=env,
-                preexec_fn=os.setsid  # Create new process group
+            # Create connection pool connector for better performance
+            self.connection_pool_connector = aiohttp.TCPConnector(
+                limit=get_config("chat_api.connection_pool_limit", 10),
+                keepalive_timeout=get_config("chat_api.keepalive_timeout", 30),
+                enable_cleanup_closed=True
             )
             
-            # Wait for initial prompt
-            try:
-                initial_timeout = get_config("timeouts.initial_prompt_timeout")
-                await self._wait_for_prompt(timeout=initial_timeout)
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout waiting for initial prompt from chat session {self.session_id}")
-                await self.close()
-                return False
+            # Create HTTP session with connection pooling
+            timeout = aiohttp.ClientTimeout(
+                total=get_config("timeouts.message_response_timeout"),
+                connect=get_config("timeouts.connect_timeout", 10)
+            )
+            self.http_session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=self.connection_pool_connector
+            )
             
-            if self.debug_mode and self.process:
-                logger.debug(f"Chat session {self.session_id} spawned, PID: {self.process.pid}")
-            
+            # HTTP session created successfully
+            if self.debug_mode:
+                api_url = os.environ.get("CHAT_API_BASE_URL", get_config("chat_api.base_url"))
+                logger.debug(f"Chat session {self.session_id} HTTP session ready for API: {api_url}")
             return True
-            
+                
         except Exception as e:
             logger.error(f"Failed to create chat session {self.session_id}: {e}")
             return False
     
-    async def _wait_for_prompt(self, timeout: float | None = None):
-        """Wait for the '> ' prompt from the chat process, consuming startup messages"""
-        if timeout is None:
-            timeout = get_config("timeouts.prompt_wait_timeout")
+    async def _get_api_headers(self):
+        """Get headers for API requests"""
+        headers = {
+            "Content-Type": "application/json",
+            "X-Session-ID": self.api_session_id
+        }
         
-        if not self.process:
-            raise Exception(f"No process for session {self.session_id}")
-        
-        buffer = b''
-        all_output = b''  # Collect all output for debugging
-        
-        async def read_until_prompt():
-            nonlocal buffer, all_output
-            prompt_count = 0
+        # Add API key if configured
+        api_key = get_config("chat_api.api_key", "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
             
-            while True:
-                try:
-                    if not self.process or not self.process.stdout:
-                        raise Exception(f"Process terminated for session {self.session_id}")
-                    chunk_timeout = get_config("timeouts.read_chunk_timeout")
-                    chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=chunk_timeout)
-                    if not chunk:
-                        if self.process and self.process.returncode is not None:
-                            raise Exception(f"Process exited with code {self.process.returncode}")
-                        continue
-                    
-                    buffer += chunk
-                    all_output += chunk
-                    
-                    # Check for prompt at end of buffer
-                    if buffer.endswith(b'\n> ') or buffer.endswith(b'> '):
-                        prompt_count += 1
-                        
-                        # The first prompt often comes with startup messages
-                        # Wait for a clean prompt (just "\n> " without other text on the same line)
-                        # or return after seeing at least one prompt
-                        if prompt_count >= 1:
-                            # Check if this is a clean prompt (no other text on the same line)
-                            lines = buffer.split(b'\n')
-                            if len(lines) >= 2 and lines[-2] == b'' and lines[-1] == b'> ':
-                                # Clean prompt found
-                                return all_output
-                            elif buffer.endswith(b'\n> '):
-                                # Also accept prompts that end with newline
-                                return all_output
-                            elif prompt_count >= 2:
-                                # Accept any prompt after seeing multiple
-                                return all_output
-                        
-                        # Keep buffer size limited
-                        if len(buffer) > 200:
-                            buffer = buffer[-200:]
-                            
-                except asyncio.TimeoutError:
-                    continue
-        
-        result = await asyncio.wait_for(read_until_prompt(), timeout=timeout)
-        
-        if self.debug_mode:
-            # Log startup messages for debugging
-            startup_text = result.decode('utf-8', errors='ignore')
-            max_display = get_config("limits.max_startup_text_display")
-            if len(startup_text) > max_display:
-                truncate_len = get_config("limits.message_truncation_length")
-                logger.debug(f"Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
-            else:
-                truncate_len = get_config("limits.message_truncation_length")
-                logger.debug(f"Startup messages from {self.session_id}: {startup_text[:truncate_len]}...")
-        
-        return result
+        return headers
     
-    async def send_message(self, message: str):
-        """Send message to chat process and get response"""
-        if not self.process:
-            return f"Error: No chat process for session {self.session_id}"
-        
+    async def send_message(self, message: str) -> str:
+        """Send message to chat API and get response with retry logic"""
         async with self.lock:
-            try:
-                # Send message
-                if not self.process or not self.process.stdin:
-                    return f"Error: No active process for session {self.session_id}"
-                self.process.stdin.write(f"{message}\n".encode('utf-8'))
-                await self.process.stdin.drain()
+            return await self._send_message_with_retry(message)
+    
+    async def _send_message_with_retry(self, message: str, attempt: int = 0) -> str:
+        """Internal method to send message with retry logic"""
+        try:
+            if not self.http_session:
+                # Attempt to restart session once
+                if attempt == 0:
+                    success = await self.start()
+                    if success:
+                        return await self._send_message_with_retry(message, attempt + 1)
+                return f"Error: No HTTP session available for {self.session_id}"
+            
+            # Prepare API request - use environment variable or config
+            api_url = os.environ.get("CHAT_API_BASE_URL", get_config("chat_api.base_url"))
+            endpoint = f"{api_url}/api/chat"
+            
+            headers = await self._get_api_headers()
+            
+            payload = {
+                "messages": [{"role": "user", "content": message}],
+                "stream": False
+            }
+            
+            if self.debug_mode:
+                logger.debug(f"Session {self.session_id} API request: {endpoint} (attempt {attempt + 1})")
+            
+            async with self.http_session.post(endpoint, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    try:
+                        result = await response.json()
+                        # Extract content from OpenAI-compatible response
+                        if "choices" in result and result["choices"]:
+                            content = result["choices"][0]["message"]["content"]
+                            # Reset retry count on success
+                            self.retry_count = 0
+                            return content.strip() if content else "(No response content)"
+                        else:
+                            logger.warning(f"Unexpected API response format: {result}")
+                            return "Error: Unexpected API response format - no choices found"
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse JSON response: {e}")
+                        return "Error: Invalid JSON response from chat service"
                 
-                # Read response until next prompt
-                response = b''
-                buffer = b''
+                elif response.status == 429:
+                    # Rate limit - wait and retry
+                    if attempt < self.max_retries:
+                        wait_time = min(2 ** attempt, 60)  # Exponential backoff, max 60s
+                        logger.warning(f"Rate limited, waiting {wait_time}s before retry (attempt {attempt + 1})")
+                        await asyncio.sleep(wait_time)
+                        return await self._send_message_with_retry(message, attempt + 1)
+                    return "Error: Chat service rate limit exceeded, please try again later"
                 
-                while True:
-                    if not self.process or not self.process.stdout:
-                        return f"Error: Process terminated for session {self.session_id}"
-                    msg_timeout = get_config("timeouts.message_response_timeout")
-                    chunk = await asyncio.wait_for(self.process.stdout.read(1), timeout=msg_timeout)
-                    if not chunk:
-                        if self.process and self.process.returncode is not None:
-                            return f"Error: Process exited with code {self.process.returncode}"
-                        continue
-                    
-                    buffer += chunk
-                    response += chunk
-                    
-                    # Only check for prompt when we have a complete line ending with "> "
-                    # and haven't received new data for a brief moment (to ensure we're at a real prompt)
-                    if len(buffer) >= 3 and buffer[-3:] == b'\n> ':
-                        # Try to read one more byte with a very short timeout to see if more data is coming
-                        try:
-                            if not self.process or not self.process.stdout:
-                                break
-                            extra = await asyncio.wait_for(self.process.stdout.read(1), timeout=0.1)
-                            if extra:
-                                # More data coming, this wasn't the real prompt
-                                buffer += extra
-                                response += extra
-                                continue
-                        except asyncio.TimeoutError:
-                            # No more data, this is likely the real prompt
-                            if response.endswith(b'\n> '):
-                                response = response[:-3]
-                            break
-                    
-                    # Keep buffer size limited
-                    max_buffer = get_config("limits.max_buffer_size")
-                    if len(buffer) > max_buffer:
-                        buffer = buffer[-max_buffer:]
+                elif response.status in [500, 502, 503, 504]:
+                    # Server errors - retry with backoff
+                    if attempt < self.max_retries:
+                        wait_time = min(2 ** attempt, 30)  # Exponential backoff, max 30s
+                        logger.warning(f"Server error {response.status}, retrying in {wait_time}s (attempt {attempt + 1})")
+                        await asyncio.sleep(wait_time)
+                        return await self._send_message_with_retry(message, attempt + 1)
+                    error_text = await response.text()
+                    return f"Error: Chat service unavailable after {self.max_retries} retries ({response.status}): {error_text[:200]}"
                 
-                # Decode and clean response
-                text = response.decode('utf-8', errors='ignore')
-                
-                # Remove echo of the input message if present
-                # The echo might appear after some whitespace or newlines
-                lines = text.split('\n')
-                clean_lines = []
-                message_found = False
-                
-                for line in lines:
-                    # Skip the line if it's exactly our input message
-                    if line.strip() == message.strip() and not message_found:
-                        message_found = True
-                        continue
-                    # Keep all other lines
-                    clean_lines.append(line)
-                
-                # Rejoin and clean up
-                text = '\n'.join(clean_lines).strip()
-                
-                return text
-                
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout in send_message for session {self.session_id}, attempting to restart process")
-                # Try to restart the process
-                await self.restart_process()
-                return "Error: Timeout waiting for response - process restarted"
-            except Exception as e:
-                return f"Error: {e}"
+                elif response.status == 401:
+                    return "Error: Authentication failed - check API key configuration"
+                elif response.status == 403:
+                    return "Error: Access forbidden - check API permissions"
+                elif response.status == 404:
+                    return "Error: Chat service endpoint not found - check configuration"
+                else:
+                    error_text = await response.text()
+                    logger.error(f"API error {response.status}: {error_text[:200]}")
+                    return f"Error: API request failed ({response.status}): {error_text[:200]}"
+        
+        except (ClientConnectorError, ConnectionRefusedError) as e:
+            logger.error(f"Connection error for session {self.session_id}: {e}")
+            # Try to restart session once
+            if attempt == 0:
+                logger.info(f"Attempting to restart HTTP session for {self.session_id}")
+                success = await self.restart_process()
+                if success:
+                    return await self._send_message_with_retry(message, attempt + 1)
+            return f"Error: Cannot connect to chat service - {str(e)[:100]}"
+        
+        except (asyncio.TimeoutError, ServerTimeoutError):
+            if attempt < self.max_retries:
+                wait_time = min(2 ** attempt, 15)  # Shorter backoff for timeouts
+                logger.warning(f"Timeout in API request for session {self.session_id}, retrying in {wait_time}s (attempt {attempt + 1})")
+                await asyncio.sleep(wait_time)
+                return await self._send_message_with_retry(message, attempt + 1)
+            logger.warning(f"Timeout in API request for session {self.session_id} after {self.max_retries} retries")
+            return f"Error: Request timeout after {self.max_retries} retries - chat service may be overloaded"
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error for session {self.session_id}: {e}")
+            return "Error: Invalid response format from chat service"
+        
+        except Exception as e:
+            logger.error(f"Unexpected API error for session {self.session_id}: {type(e).__name__}: {e}")
+            return f"Error: Unexpected error - {type(e).__name__}: {str(e)[:100]}"
     
     async def restart_process(self):
-        """Restart the chat process"""
-        # Close existing process
+        """Restart the HTTP session"""
+        # Close existing session
         await self.close()
         
-        # Create new process
-        try:
-            import os
-            # Get configuration
-            python_exec = get_config("chat_system.python_executable")
-            script_path = get_config("chat_system.script_path")
-            working_dir = get_config("chat_system.working_directory")
-            startup_args = get_config("chat_system.startup_args")
-            env_vars = get_config("chat_system.environment")
-            
-            # Prepare command arguments
-            cmd_args = [python_exec, '-u', script_path] + startup_args
-            
-            # Prepare environment variables
-            env = {**os.environ, **env_vars}
-            
-            self.process = await asyncio.create_subprocess_exec(
-                *cmd_args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-                env=env,
-                preexec_fn=os.setsid  # Create new process group
-            )
-            
-            # Wait for initial prompt
-            restart_timeout = get_config("timeouts.initial_prompt_timeout")
-            await self._wait_for_prompt(timeout=restart_timeout)
-            logger.info(f"Chat session {self.session_id} restarted successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to restart chat session {self.session_id}: {e}")
-            self.process = None
+        # Create new HTTP session
+        return await self.start()
 
     async def close(self):
-        """Close the chat subprocess"""
-        if self.process:
+        """Close the HTTP session and connection pool"""
+        if self.http_session:
             try:
-                # Terminate the entire process group
-                try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    # Process group may not exist, fall back to single process
-                    self.process.terminate()
-                
-                try:
-                    term_timeout = get_config("timeouts.process_termination_timeout")
-                    await asyncio.wait_for(self.process.wait(), timeout=term_timeout)
-                except asyncio.TimeoutError:
-                    # Force kill the entire process group
-                    try:
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        # Process group may not exist, fall back to single process
-                        self.process.kill()
-                    await self.process.wait()
-                
-                logger.info(f"Chat session {self.session_id} closed")
+                await self.http_session.close()
+                logger.info(f"Chat session {self.session_id} HTTP session closed")
             except Exception as e:
-                logger.error(f"Error closing chat session {self.session_id}: {e}")
+                logger.error(f"Error closing HTTP session {self.session_id}: {e}")
             finally:
-                self.process = None
+                self.http_session = None
+        
+        if self.connection_pool_connector:
+            try:
+                await self.connection_pool_connector.close()
+            except Exception as e:
+                logger.error(f"Error closing connection pool for {self.session_id}: {e}")
+            finally:
+                self.connection_pool_connector = None
 
 class TaskScheduler:
     """Manages scheduled tasks and chat sessions"""
     
     def __init__(self):
         self.chat_sessions: Dict[str, ChatSession] = {}
+        self.api_session_ids: Dict[str, str] = {}  # Store API session IDs: session_id -> api_session_id
         self.running = False
         self.task_queue = None  # Initialize later when event loop is ready
         self.debug_mode = DEBUG_MODE
@@ -313,11 +228,15 @@ class TaskScheduler:
         if session_id in self.chat_sessions:
             return True  # Session already exists
             
-        session = ChatSession(session_id, self.debug_mode)
+        # Reuse existing API session ID if available, otherwise a new one will be created
+        api_session_id = self.api_session_ids.get(session_id)
+        session = ChatSession(session_id, self.debug_mode, api_session_id)
         success = await session.start()
         
         if success:
             self.chat_sessions[session_id] = session
+            # Store the API session ID for future use
+            self.api_session_ids[session_id] = session.api_session_id
             
             # Initialize task list for this session
             if session_id not in self.scheduled_tasks:
@@ -681,7 +600,7 @@ class TaskScheduler:
         
         # Load current config
         try:
-            with open("config.json", "r") as f:
+            with open("config/config.json", "r") as f:
                 config = json.load(f)
         except FileNotFoundError:
             config = {}
@@ -695,7 +614,7 @@ class TaskScheduler:
         
         # Write back to config.json
         try:
-            with open("config.json", "w") as f:
+            with open("config/config.json", "w") as f:
                 json.dump(config, f, indent=2)
             return True, f"Task plan '{plan_name}' saved successfully"
         except Exception as e:
@@ -706,7 +625,7 @@ class TaskScheduler:
         import json
         
         try:
-            with open("config.json", "r") as f:
+            with open("config/config.json", "r") as f:
                 config = json.load(f)
         except FileNotFoundError:
             return False, "Config file not found"
@@ -770,7 +689,7 @@ class TaskScheduler:
         import json
         
         try:
-            with open("config.json", "r") as f:
+            with open("config/config.json", "r") as f:
                 config = json.load(f)
         except FileNotFoundError:
             return []

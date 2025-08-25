@@ -19,85 +19,47 @@ let sessionRecoveryAttempted = false;
 
 // Sessions will be initialized in initializePage() to prevent early WebSocket connections
 
-// WebSocket connection for specific session
+// Get base path from global variable (injected by server)
+function getBasePath() {
+    return window.BASE_PATH || '';
+}
+
+// Helper function to get cookie value
+function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+    return null;
+}
+
+// Helper function to create path-aware API URLs
+function apiUrl(path) {
+    const basePath = getBasePath();
+    return `${basePath}${path}`;
+}
+
+// Initialize session (no persistent connection needed)
 function connectSession(sessionId) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/${sessionId}`;
+    // Update tab and session name to show ready state
+    const last4Digits = sessionId.toString().slice(-4);
+    const sessionName = `Chat ${last4Digits}`;
     
-    const websocket = new WebSocket(wsUrl);
+    const tab = document.querySelector(`[data-session="${sessionId}"].tab .tab-title`);
+    if (tab && tab.textContent.includes('Init...')) {
+        tab.textContent = sessionName;
+    }
     
-    websocket.onopen = function(event) {
-        console.log(`Session ${sessionId} connected`);
-        sessions[sessionId].websocket = websocket;
-        
-        // Update tab and session name to show ready state
-        const last4Digits = sessionId.toString().slice(-4);
-        const sessionName = `Chat ${last4Digits}`;
-        
-        const tab = document.querySelector(`[data-session="${sessionId}"].tab .tab-title`);
-        if (tab && tab.textContent.includes('Init...')) {
-            tab.textContent = sessionName;
-        }
-        
-        // Update session object name
-        if (sessions[sessionId]) {
-            sessions[sessionId].name = sessionName;
-        }
-        
-        // Update UI if this is the active session
-        if (sessionId === activeSessionId) {
-            messageInput.disabled = false;
-            sendButton.disabled = false;
-        }
-    };
+    // Update session object name
+    if (sessions[sessionId]) {
+        sessions[sessionId].name = sessionName;
+    }
     
-    websocket.onmessage = function(event) {
-        const message = JSON.parse(event.data);
-        
-        // Add message to this specific session
-        addMessageToSession(sessionId, message);
-        
-        // Store message in session history
-        sessions[sessionId].messages.push(message);
-    };
+    // Update UI if this is the active session
+    if (sessionId === activeSessionId) {
+        messageInput.disabled = false;
+        sendButton.disabled = false;
+    }
     
-    websocket.onclose = function(event) {
-        console.log(`Session ${sessionId} disconnected (code: ${event.code})`);
-        sessions[sessionId].websocket = null;
-        
-        // Update UI if this is the active session
-        if (sessionId === activeSessionId) {
-            messageInput.disabled = true;
-            sendButton.disabled = true;
-        }
-        
-        // If session was rejected (code 4004 or 1006 from 403), don't try to reconnect
-        if (event.code === 4004 || event.code === 1006) {
-            console.log(`Session ${sessionId} rejected by server - removing from client`);
-            // Remove this session from client
-            delete sessions[sessionId];
-            
-            // Remove tab and chat session elements
-            const tab = document.querySelector(`[data-session="${sessionId}"].tab`);
-            const chatSession = document.querySelector(`[data-session="${sessionId}"].chat-session`);
-            if (tab) tab.remove();
-            if (chatSession) chatSession.remove();
-            
-            // If this was the active session and no sessions remain, create a new one
-            if (sessionId === activeSessionId && Object.keys(sessions).length === 0) {
-                createNewSession();
-            }
-        } else {
-            // Normal disconnect - try to reconnect after 3 seconds
-            setTimeout(() => connectSession(sessionId), 3000);
-        }
-    };
-    
-    websocket.onerror = function(error) {
-        console.error(`WebSocket error for session ${sessionId}:`, error);
-    };
-    
-    return websocket;
 }
 
 // Attempt session recovery from server
@@ -106,23 +68,16 @@ async function attemptSessionRecovery() {
     sessionRecoveryAttempted = true;
     
     try {
-        const response = await fetch('/api/sessions');
+        const response = await fetch(apiUrl('/web/sessions'), {
+            credentials: 'same-origin'
+        });
         const data = await response.json();
         if (data.sessions && data.sessions.length > 0) {
             
-            // Check if any sessions have meaningful data before clearing current state
-            let meaningfulSessions = [];
+            // Recover all sessions found on the server (including empty ones)
+            let meaningfulSessions = data.sessions;
             
-            for (const sessionInfo of data.sessions) {
-                const hasHistory = sessionInfo.history_count > 0;
-                const hasTasks = sessionInfo.task_count > 0;
-                
-                if (hasHistory || hasTasks) {
-                    meaningfulSessions.push(sessionInfo);
-                }
-            }
-            
-            // Only proceed with recovery if we found meaningful sessions
+            // Proceed with recovery if any sessions exist
             if (meaningfulSessions.length > 0) {
                 
                 // Clear current session and UI
@@ -147,12 +102,16 @@ async function attemptSessionRecovery() {
                         id: sessionId,
                         name: `Chat ${sessionId}`,
                         messages: [],
-                        websocket: null
+                        eventSource: null,
+                        existsOnServer: true  // Recovered from server
                     };
                     
                     // Create tab for this session
                     createTabElement(sessionId);
                     createChatSessionElement(sessionId);
+                    
+                    // Update session UI to show it's ready
+                    connectSession(sessionId);
                     
                     if (!hasActiveSessions) {
                         activeSessionId = sessionId;
@@ -171,6 +130,45 @@ async function attemptSessionRecovery() {
     }
 }
 
+// Load chat history for a session from server
+async function loadSessionHistory(sessionId) {
+    try {
+        const response = await fetch(apiUrl(`/web/sessions/${sessionId}/history`), {
+            credentials: 'same-origin'
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            const history = data.history || [];
+            
+            // Clear current messages and load from server
+            if (sessions[sessionId]) {
+                sessions[sessionId].messages = [];
+                
+                // Add each message to the session and display
+                for (const msgData of history) {
+                    const message = {
+                        message: msgData.message,
+                        sender: msgData.sender,
+                        timestamp: msgData.timestamp
+                    };
+                    sessions[sessionId].messages.push(message);
+                    
+                    // Display message if this is the active session
+                    if (sessionId == activeSessionId) {
+                        addMessageToSession(sessionId, message);
+                    }
+                }
+                
+            }
+        } else {
+            console.warn(`Failed to load history for session ${sessionId}:`, response.status);
+        }
+    } catch (error) {
+        console.error(`Error loading history for session ${sessionId}:`, error);
+    }
+}
+
 // Create a new session when recovery fails
 async function createNewSession() {
     try {
@@ -183,10 +181,12 @@ async function createNewSession() {
             id: tempSessionId,
             name: `Init...`,
             messages: [],
-            websocket: null
+            existsOnServer: false  // New session, not created on server yet
         };
         
         activeSessionId = tempSessionId;
+        
+        // Session persistence now handled server-side via cookies
         
         // Create tab and chat session elements immediately
         createTabElement(tempSessionId);
@@ -194,11 +194,12 @@ async function createNewSession() {
         switchToTab(tempSessionId);
         
         // Now request server to create the actual session
-        const response = await fetch('/api/sessions/new', {
+        const response = await fetch(apiUrl('/web/sessions/new'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-            }
+            },
+            credentials: 'same-origin'
         });
         
         if (response.ok) {
@@ -211,7 +212,7 @@ async function createNewSession() {
                 id: newSessionId,
                 name: `Init...`,
                 messages: [],
-                websocket: null
+                eventSource: null
             };
             
             // Update DOM elements with real session ID
@@ -239,10 +240,12 @@ async function createNewSession() {
             activeSessionId = newSessionId;
             nextSessionId = newSessionId + 1;
             
-            // Connect to the new session
+            // Mark session as existing on server
+            sessions[newSessionId].existsOnServer = true;
+            
+            // Update session UI to show it's ready
             connectSession(newSessionId);
             
-            console.log(`Created new session ${newSessionId}`);
         } else {
             // Remove the temporary session on failure
             delete sessions[tempSessionId];
@@ -259,14 +262,8 @@ async function createNewSession() {
     }
 }
 
-// Connect all sessions
-function connectAllSessions() {
-    for (const sessionId in sessions) {
-        if (!sessions[sessionId].websocket || sessions[sessionId].websocket.readyState === WebSocket.CLOSED) {
-            connectSession(parseInt(sessionId));
-        }
-    }
-    
+// WebSocket connection removed - using SSE only
+function loadTasksAfterRecovery() {
     // Load tasks when first session connects
     if (Object.keys(sessions).length > 0) {
         setTimeout(loadTasks, 1000);
@@ -314,15 +311,73 @@ function addMessageToSession(sessionId, message) {
 }
 
 // Send chat message
-function sendMessage() {
+async function sendMessage() {
     const message = messageInput.value.trim();
-    const activeSession = sessions[activeSessionId];
     
-    if (message && activeSession && activeSession.websocket && activeSession.websocket.readyState === WebSocket.OPEN) {
-        activeSession.websocket.send(JSON.stringify({type: "chat", message: message}));
-        messageInput.value = '';
+    if (message && activeSessionId) {
+        try {
+            messageInput.value = '';  // Clear input immediately
+            messageInput.disabled = true;
+            sendButton.disabled = true;
+            
+            // Send message via POST with SSE response
+            const response = await fetch(apiUrl('/web/chat'), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'same-origin',
+                body: JSON.stringify({ 
+                    message: message,
+                    session_id: activeSessionId
+                })
+            });
+            
+            if (response.ok) {
+                // Handle SSE response
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                if (data.done) {
+                                    // Stream is complete
+                                    break;
+                                } else if (data.error) {
+                                    showNotification(`AI Error: ${data.error}`, 'error');
+                                } else {
+                                    // Add message to session
+                                    addMessageToSession(activeSessionId, data);
+                                    sessions[activeSessionId].messages.push(data);
+                                }
+                            } catch (e) {
+                                console.error('Error parsing SSE data:', e);
+                            }
+                        }
+                    }
+                }
+            } else {
+                const error = await response.text();
+                showNotification(`Failed to send message: ${error}`, 'error');
+            }
+        } catch (error) {
+            showNotification(`Failed to send message: ${error}`, 'error');
+        } finally {
+            messageInput.disabled = false;
+            sendButton.disabled = false;
+            messageInput.focus();
+        }
     } else {
-        showNotification('Not connected to chat session', 'error');
+        showNotification('No active session', 'error');
     }
 }
 
@@ -375,6 +430,11 @@ function switchToTab(sessionId) {
     // Update active session
     activeSessionId = sessionId;
     
+    // Load history if not already loaded AND session exists on server
+    if (sessions[sessionId] && sessions[sessionId].messages.length === 0 && sessions[sessionId].existsOnServer) {
+        loadSessionHistory(sessionId);
+    }
+    
     // Refresh display to show active plan for this session
     loadSavedPlans();
     
@@ -392,7 +452,7 @@ function switchToTab(sessionId) {
     
     // Update connection status for active session
     const activeSession = sessions[sessionId];
-    if (activeSession && activeSession.websocket && activeSession.websocket.readyState === WebSocket.OPEN) {
+    if (activeSession) {
         messageInput.disabled = false;
         sendButton.disabled = false;
     } else {
@@ -410,27 +470,21 @@ function switchToTab(sessionId) {
 }
 
 async function closeTab(sessionId) {
-    console.log(`closeTab called for session ${sessionId}`);
-    
     // If closing the last tab, create a new one first
     if (Object.keys(sessions).length <= 1) {
         await createNewSession();
         // Continue with closing the original tab
     }
     
-    // Close WebSocket connection
-    const session = sessions[sessionId];
-    if (session && session.websocket) {
-        session.websocket.close();
-    }
+    // No connections to close (using SSE)
     
     // Delete session on server side
     try {
-        const response = await fetch(`/api/sessions/${sessionId}`, {
+        const response = await fetch(apiUrl(`/web/sessions/${sessionId}`), {
             method: 'DELETE'
         });
         if (response.ok) {
-            console.log(`Successfully deleted session ${sessionId} on server`);
+            // Session deleted successfully
         } else {
             console.error(`Failed to delete session ${sessionId}:`, response.status);
         }
@@ -467,7 +521,7 @@ async function scheduleTask() {
     }
     
     try {
-        const response = await fetch(`/api/sessions/${activeSessionId}/schedule`, {
+        const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/schedule`), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -479,7 +533,7 @@ async function scheduleTask() {
         });
         
         if (response.ok) {
-            const result = await response.json();
+            await response.json();
             showNotification(`Task scheduled for Session ${activeSessionId}!`, 'success');
             scheduleTimeInput.value = '';
             scheduleMessageInput.value = '';
@@ -496,7 +550,7 @@ async function scheduleTask() {
 // Load and display tasks for active session
 async function loadTasks() {
     try {
-        const response = await fetch(`/api/sessions/${activeSessionId}/tasks`);
+        const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/tasks`));
         const data = await response.json();
         
         displayTasks(data.tasks);
@@ -547,7 +601,7 @@ async function deleteTask(index) {
     }
     
     try {
-        const response = await fetch(`/api/sessions/${activeSessionId}/tasks/${index}`, {
+        const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/tasks/${index}`), {
             method: 'DELETE'
         });
         
@@ -572,7 +626,7 @@ async function clearAllTasks() {
     }
     
     try {
-        const response = await fetch(`/api/sessions/${activeSessionId}/tasks`, {
+        const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/tasks`), {
             method: 'DELETE'
         });
         
@@ -633,7 +687,7 @@ function showNotification(message, type = 'info') {
 async function savePlan() {
     try {
         // Get the current active plan name to use as default
-        const activeResponse = await fetch(`/api/sessions/${activeSessionId}/active-plan`);
+        const activeResponse = await fetch(apiUrl(`/web/sessions/${activeSessionId}/active-plan`));
         let defaultName = '';
         
         if (activeResponse.ok) {
@@ -648,7 +702,7 @@ async function savePlan() {
             return;
         }
         
-        const url = `/api/task-plans/save?plan_name=${encodeURIComponent(planName.trim())}&session_id=${activeSessionId}`;
+        const url = apiUrl(`/web/task-plans/save?plan_name=${encodeURIComponent(planName.trim())}&session_id=${activeSessionId}`);
         const response = await fetch(url, {
             method: 'POST'
         });
@@ -669,7 +723,7 @@ async function savePlan() {
 
 async function refreshPlans() {
     try {
-        const response = await fetch('/api/task-plans');
+        const response = await fetch(apiUrl('/web/task-plans'));
         if (response.ok) {
             const data = await response.json();
             
@@ -696,7 +750,7 @@ async function refreshPlans() {
 
 async function loadSavedPlans() {
     try {
-        const response = await fetch('/api/task-plans');
+        const response = await fetch(apiUrl('/web/task-plans'));
         if (response.ok) {
             const data = await response.json();
             displayCurrentPlans(data.plans);
@@ -714,7 +768,7 @@ async function displayCurrentPlans(plans) {
     
     try {
         // Get active plan for current session from server
-        const response = await fetch(`/api/sessions/${activeSessionId}/active-plan`);
+        const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/active-plan`));
         if (!response.ok) {
             currentPlansList.innerHTML = '<div class="no-plans">No active plan</div>';
             return;
@@ -793,7 +847,7 @@ async function loadSelectedPlan(planName) {
         // First verify the session exists on the backend with retries
         let sessionReady = false;
         for (let i = 0; i < 3; i++) {
-            const sessionCheck = await fetch(`/api/sessions/${activeSessionId}`);
+            const sessionCheck = await fetch(apiUrl(`/web/sessions/${activeSessionId}`));
             if (sessionCheck.ok) {
                 sessionReady = true;
                 break;
@@ -808,7 +862,7 @@ async function loadSelectedPlan(planName) {
             return;
         }
         
-        const response = await fetch(`/api/task-plans/${encodeURIComponent(planName)}/load?session_id=${activeSessionId}`, {
+        const response = await fetch(apiUrl(`/web/task-plans/${encodeURIComponent(planName)}/load?session_id=${activeSessionId}`), {
             method: 'POST'
         });
         
@@ -819,7 +873,6 @@ async function loadSelectedPlan(planName) {
             // Add a small delay to ensure backend has processed the plan loading
             setTimeout(async () => {
                 await loadTasks(); // Refresh the task list
-                console.log('Tasks refreshed after loading plan');
             }, 500);
             
             await loadSavedPlans(); // Refresh the display to show active plan
@@ -881,6 +934,10 @@ setInterval(loadTasks, 30000);
 
 // Initialize page: attempt recovery then connect sessions
 async function initializePage() {
+    // Clear old localStorage session data (now using server-side persistence)
+    localStorage.removeItem('agentSessions');
+    localStorage.removeItem('activeSessionId');
+    
     // Clear everything first
     sessions = {};
     activeSessionId = null;
@@ -904,7 +961,7 @@ async function initializePage() {
         await createNewSession();
     } else {
         // Connect to recovered sessions
-        connectAllSessions();
+        loadTasksAfterRecovery();
     }
 }
 

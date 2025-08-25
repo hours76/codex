@@ -75,7 +75,7 @@ def setup_logging():
 # Configuration Management
 _config_cache = None
 
-def load_config(config_path: str = "config.json") -> Dict[str, Any]:
+def load_config(config_path: str = "config/config.json") -> Dict[str, Any]:
     """Load configuration from JSON file with caching"""
     global _config_cache
     
