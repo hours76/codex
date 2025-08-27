@@ -22,13 +22,12 @@ from monitor import get_task_monitor
 logger = logging.getLogger("agent")
 
 class ChatManager:
-    """Manages SSE connections and message broadcasting"""
+    """Manages chat sessions and message storage"""
     
     def __init__(self, scheduler: TaskScheduler):
         self.scheduler = scheduler
         self.chat_history: Dict[str, List[ChatMessage]] = {}  # agent_session_id -> [messages]
         self.web_session_agents: Dict[str, List[str]] = {}  # web_session_id -> [agent_session_ids]
-        self.sse_queues: Dict[str, List[asyncio.Queue]] = {}  # agent_session_id -> [queues for SSE]
         
     def ensure_session(self, agent_session_id: str, web_session_id: str = None):
         """Ensure session exists and is properly initialized"""
@@ -40,54 +39,108 @@ class ChatManager:
         if web_session_id:
             self.assign_agent_to_web_session(web_session_id, agent_session_id)
     
-    async def broadcast_to_session(self, session_id: str, message: ChatMessage):
-        """Broadcast message to specific session"""
-        # Store message in session history
-        if session_id not in self.chat_history:
-            self.chat_history[session_id] = []
+    def store_message(self, session_id: str, message: ChatMessage):
+        """Store message in session history directly"""
+        # Ensure session_id is always a string for consistent dictionary keys
+        session_key = str(session_id)
         
-        self.chat_history[session_id].append(message)
+        # Store message in session history
+        if session_key not in self.chat_history:
+            self.chat_history[session_key] = []
+        
+        self.chat_history[session_key].append(message)
         
         # Keep only last N messages per session
         max_history = get_config("limits.max_chat_history_per_session")
-        if len(self.chat_history[session_id]) > max_history:
-            self.chat_history[session_id] = self.chat_history[session_id][-max_history:]
+        if len(self.chat_history[session_key]) > max_history:
+            self.chat_history[session_key] = self.chat_history[session_key][-max_history:]
         
-        # Send to all SSE queues for this session
-        await self.broadcast_to_sse(session_id, message)
+        logger.info(f"Stored message for session '{session_key}'. Total messages: {len(self.chat_history[session_key])}")
     
 
-    async def ask_ai(self, session_id: str, question: str) -> str:
-        """Send question to AI and get response for specific session"""
-        return await self.scheduler.agent_ask_async(session_id, question, "user")
+    async def ask_ai(self, session_id: str, question: str, stream_callback=None) -> str:
+        """Send question to AI and get response for specific session with optional streaming"""
+        return await self.scheduler.agent_ask_async(session_id, question, "user", stream_callback)
     
-    async def broadcast_scheduled_question(self, session_id: str, question: str):
-        """Broadcast scheduled question to specific session"""
+    async def process_scheduled_message(self, session_id: str, message: str) -> str:
+        """Process scheduled message using the same flow as manual user input"""
+        # Create the session if it doesn't exist
+        if session_id not in self.scheduler.chat_sessions:
+            success = await self.scheduler.create_chat_session(session_id)
+            if not success:
+                raise Exception("Failed to create chat session")
+        
+        # Store user message directly in chat history (same as /web/chat endpoint)
+        user_msg = ChatMessage(
+            message=f"[AGENT] {message}",
+            sender="user",
+            timestamp=datetime.now().isoformat()
+        )
+        
+        if session_id not in self.chat_history:
+            self.chat_history[session_id] = []
+        self.chat_history[session_id].append(user_msg)
+        
+        truncate_len = get_config("limits.message_truncation_length")
+        logger.info(f"Scheduled message stored for session {session_id}: {message[:truncate_len]}...")
+        
+        # Get AI response using the same method as manual input
+        try:
+            response = await self.ask_ai(session_id, message)
+            
+            if response and response.strip():
+                # Store AI response directly in chat history (same as /web/chat endpoint)
+                ai_msg = ChatMessage(
+                    message=response,
+                    sender="assistant",
+                    timestamp=datetime.now().isoformat()
+                )
+                self.chat_history[session_id].append(ai_msg)
+                
+                logger.info(f"Scheduled AI response stored for session {session_id}: {response[:truncate_len]}...")
+                return response
+            else:
+                logger.warning(f"Empty response for scheduled message in session {session_id}")
+                return "No response received"
+                
+        except Exception as e:
+            logger.error(f"Error processing scheduled message for session {session_id}: {e}")
+            # Store error message in chat history
+            error_msg = ChatMessage(
+                message=f"Error processing scheduled message: {str(e)}",
+                timestamp=datetime.now().isoformat(),
+                sender="system"
+            )
+            self.chat_history[session_id].append(error_msg)
+            return f"Error: {str(e)}"
+    
+    def store_scheduled_question(self, session_id: str, question: str):
+        """Store scheduled question in session history"""
         scheduled_message = ChatMessage(
             message=f"[SCHEDULED] {question}",
             timestamp=datetime.now().isoformat(),
-            sender="scheduled"
+            sender="user"
         )
-        await self.broadcast_to_session(session_id, scheduled_message)
+        self.store_message(session_id, scheduled_message)
     
-    async def broadcast_ai_response(self, session_id: str, response: str):
-        """Broadcast AI response to specific session"""
+    def store_ai_response(self, session_id: str, response: str):
+        """Store AI response in session history"""
         if response:
             ai_message = ChatMessage(
                 message=response,
                 timestamp=datetime.now().isoformat(),
-                sender="ai"
+                sender="assistant"
             )
-            await self.broadcast_to_session(session_id, ai_message)
+            self.store_message(session_id, ai_message)
     
-    async def broadcast_scheduled_message(self, session_id: str, question: str, response: str):
-        """Broadcast scheduled message and response to specific session (legacy method)"""
-        await self.broadcast_scheduled_question(session_id, question)
-        await self.broadcast_ai_response(session_id, response)
+    def store_scheduled_message(self, session_id: str, question: str, response: str):
+        """Store scheduled message and response in session history"""
+        self.store_scheduled_question(session_id, question)
+        self.store_ai_response(session_id, response)
     
     def get_active_sessions(self):
         """Get list of active session IDs"""
-        return list(self.active_connections.keys())
+        return list(self.chat_history.keys())
     
     def get_available_sessions(self, web_session_id: str = None):
         """Get list of available sessions, optionally filtered by web session"""
@@ -122,30 +175,9 @@ class ChatManager:
             'has_process': session_id in self.scheduler.chat_sessions,
             'has_tasks': session_id in self.scheduler.scheduled_tasks,
             'task_count': len(self.scheduler.scheduled_tasks.get(session_id, [])),
-            'is_connected': session_id in self.sse_queues
+            'is_connected': False  # HTTP-only, no persistent connections
         }
     
-    def add_sse_queue(self, session_id: str) -> asyncio.Queue:
-        """Add a new SSE queue for a session"""
-        if session_id not in self.sse_queues:
-            self.sse_queues[session_id] = []
-        queue = asyncio.Queue()
-        self.sse_queues[session_id].append(queue)
-        return queue
-    
-    def remove_sse_queue(self, session_id: str, queue: asyncio.Queue):
-        """Remove an SSE queue for a session"""
-        if session_id in self.sse_queues:
-            if queue in self.sse_queues[session_id]:
-                self.sse_queues[session_id].remove(queue)
-            if not self.sse_queues[session_id]:
-                del self.sse_queues[session_id]
-    
-    async def broadcast_to_sse(self, session_id: str, message: ChatMessage):
-        """Broadcast message to all SSE connections for a session"""
-        if session_id in self.sse_queues:
-            for queue in self.sse_queues[session_id]:
-                await queue.put(message.model_dump_json())
     
     def get_web_session_id(self, request: Request) -> str:
         """Get or create web session ID from cookies (user identification)"""
@@ -175,6 +207,10 @@ class ChatManager:
     
     def assign_agent_to_web_session(self, web_session_id: str, agent_session_id: str):
         """Assign an agent session to a web session"""
+        # Ensure both IDs are strings to avoid integer/string key mismatches
+        web_session_id = str(web_session_id)
+        agent_session_id = str(agent_session_id)
+        
         if web_session_id not in self.web_session_agents:
             self.web_session_agents[web_session_id] = []
         if agent_session_id not in self.web_session_agents[web_session_id]:
@@ -215,28 +251,26 @@ class ChatManager:
 def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
     """Create and configure FastAPI application"""
     
-    # Get base path from environment variable, fallback to config
-    base_path = os.environ.get('BASE_PATH', get_config("server.base_path", "")).rstrip('/')
-    if base_path and not base_path.startswith('/'):
-        base_path = '/' + base_path
+    # Base path will be determined dynamically from X-Forwarded-Prefix header
+    # No longer using BASE_PATH environment variable
     
-    # Log the base path configuration
-    logger.info(f"FastAPI app initialized with BASE_PATH: '{base_path or '/'}'")
-    
-    # Create app with root_path for reverse proxy support
+    # Create app - FastAPI will handle X-Forwarded headers automatically
     app = FastAPI(
-        title="Agent Manager",
-        root_path=base_path
+        title="Agent Manager"
     )
     
     # Serve static files (CSS, JS) - mount at root since root_path handles the prefix
     app.mount("/static", StaticFiles(directory="web"), name="static")
 
     @app.get("/")
-    async def get_chat_page():
+    async def get_chat_page(request: Request):
         """Serve the main chat page"""
+        # Main page accessed
         with open("web/index.html", "r") as f:
             html_content = f.read()
+        
+        # Get base path from X-Forwarded-Prefix header
+        base_path = request.headers.get('X-Forwarded-Prefix', '')
         
         # Make HTML content path-aware
         # Fix static file links and inject base path
@@ -253,11 +287,11 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         
         return HTMLResponse(content=html_content)
 
-    # WebSocket endpoint removed - using SSE only
+    # Using simple HTTP request/response pattern
 
     @app.post("/web/chat")
     async def chat_endpoint(request: Request):
-        """Single POST endpoint that returns SSE stream like chat-server"""
+        """Simple HTTP request/response chat endpoint - direct message storage"""
         # Get web session ID for validation
         web_session_id = chat_manager.get_web_session_id(request)
         
@@ -272,6 +306,9 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         if not session_id:
             raise HTTPException(status_code=400, detail="Session ID required")
         
+        # Ensure session_id is always string for consistency
+        session_id = str(session_id)
+        
         # Verify this agent session belongs to this web session
         owned_sessions = chat_manager.get_agent_sessions_for_web_session(web_session_id)
         if session_id not in owned_sessions:
@@ -284,162 +321,39 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to create chat session")
         
-        async def event_generator():
-            try:
-                # Send user message first
-                user_msg = ChatMessage(
-                    message=message,
-                    sender="user",
-                    type="user",
-                    timestamp=datetime.now().isoformat()
-                )
-                yield f"data: {user_msg.model_dump_json()}\n\n"
-                
-                # Store in history
-                if session_id not in chat_manager.chat_history:
-                    chat_manager.chat_history[session_id] = []
-                chat_manager.chat_history[session_id].append(user_msg)
-                
-                # Get AI response
-                response = await chat_manager.ask_ai(session_id, message)
-                
-                if response and response.strip():
-                    # Send AI response
-                    ai_msg = ChatMessage(
-                        message=response,
-                        sender="assistant", 
-                        type="assistant",
-                        timestamp=datetime.now().isoformat()
-                    )
-                    yield f"data: {ai_msg.model_dump_json()}\n\n"
-                    
-                    # Store in history
-                    chat_manager.chat_history[session_id].append(ai_msg)
-                    
-                    # Send done signal
-                    yield f"data: {{\"done\": true}}\n\n"
-                else:
-                    yield f"data: {{\"error\": \"Empty response from AI\"}}\n\n"
-                    
-            except Exception as e:
-                logger.error(f"Error in chat for session {session_id}: {e}")
-                yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
-        
-        response = StreamingResponse(event_generator(), media_type="text/event-stream")
-        response.headers["Cache-Control"] = "no-cache"
-        response.headers["X-Accel-Buffering"] = "no"
-        # Add session cookie
-        response.set_cookie(
-            key="web_session",
-            value=web_session_id,
-            max_age=24 * 3600,
-            httponly=True,
-            samesite="lax"
-        )
-        return response
-    
-    @app.get("/web/sessions/{session_id}/stream")
-    async def stream_messages(session_id: str, request: Request):
-        """SSE endpoint for streaming messages"""
-        # Get web session ID for validation
-        web_session_id = chat_manager.get_web_session_id(request)
-        
-        # Verify this agent session belongs to this web session
-        owned_sessions = chat_manager.get_agent_sessions_for_web_session(web_session_id)
-        if session_id not in owned_sessions:
-            # Auto-assign if not assigned yet
-            chat_manager.assign_agent_to_web_session(web_session_id, session_id)
-        
-        # Create an SSE queue for this connection
-        queue = chat_manager.add_sse_queue(session_id)
-        
-        async def event_generator():
-            try:
-                # Send existing chat history first
-                if session_id in chat_manager.chat_history:
-                    for message in chat_manager.chat_history[session_id]:
-                        yield f"data: {message.model_dump_json()}\n\n"
-                
-                # Then send new messages as they arrive
-                while True:
-                    message = await queue.get()
-                    yield f"data: {message}\n\n"
-            except asyncio.CancelledError:
-                chat_manager.remove_sse_queue(session_id, queue)
-                raise
-            except Exception as e:
-                chat_manager.remove_sse_queue(session_id, queue)
-                logger.error(f"SSE error for session {session_id}: {e}")
-                raise
-        
-        response = StreamingResponse(event_generator(), media_type="text/event-stream")
-        response.headers["Cache-Control"] = "no-cache"
-        response.headers["X-Accel-Buffering"] = "no"
-        # Add session cookie directly to StreamingResponse
-        response.set_cookie(
-            key="web_session",
-            value=web_session_id,
-            max_age=24 * 3600,  # 24 hours
-            httponly=True,
-            samesite="lax"
-        )
-        return response
-    
-    @app.post("/web/sessions/{session_id}/messages")
-    async def send_message(session_id: str, request: Request):
-        """HTTP POST endpoint to send messages"""
-        # Get web session ID for validation
-        web_session_id = chat_manager.get_web_session_id(request)
-        
-        # Verify this agent session belongs to this web session
-        owned_sessions = chat_manager.get_agent_sessions_for_web_session(web_session_id)
-        if session_id not in owned_sessions:
-            raise HTTPException(status_code=403, detail="Session not owned by this user")
-        
-        # Parse message from request body
-        data = await request.json()
-        message = data.get("message", "").strip()
-        
-        if not message:
-            raise HTTPException(status_code=400, detail="Message cannot be empty")
-        
-        # Create the session if it doesn't exist
-        if session_id not in scheduler.chat_sessions:
-            success = await scheduler.create_chat_session(session_id)
-            if not success:
-                raise HTTPException(status_code=500, detail="Failed to create chat session")
-        
-        # Add user message to history and broadcast
+        # Store user message directly in chat history
         user_msg = ChatMessage(
             message=message,
             sender="user",
-            type="user",
             timestamp=datetime.now().isoformat()
         )
-        await chat_manager.broadcast_to_session(session_id, user_msg)
+        
+        if session_id not in chat_manager.chat_history:
+            chat_manager.chat_history[session_id] = []
+        chat_manager.chat_history[session_id].append(user_msg)
         
         truncate_len = get_config("limits.message_truncation_length")
-        logger.info(f"User message from session {session_id}: {message[:truncate_len]}...")
+        logger.info(f"User message stored for session {session_id}: {message[:truncate_len]}...")
         
-        # Get AI response
+        # Get AI response synchronously
         try:
             response = await chat_manager.ask_ai(session_id, message)
             
             if response and response.strip():
-                # Add AI response to history and broadcast
+                # Store AI response directly in chat history
                 ai_msg = ChatMessage(
                     message=response,
                     sender="assistant",
-                    type="assistant",
                     timestamp=datetime.now().isoformat()
                 )
-                await chat_manager.broadcast_to_session(session_id, ai_msg)
+                chat_manager.chat_history[session_id].append(ai_msg)
                 
-                logger.info(f"AI response to session {session_id}: {response[:truncate_len]}...")
+                logger.info(f"AI response stored for session {session_id}: {response[:truncate_len]}...")
                 
+                # Return acknowledgment only - AI response will be sent via SSE
                 return chat_manager.make_response_with_session({
                     "status": "success",
-                    "response": response
+                    "message": "Message processed"
                 }, web_session_id, request)
             else:
                 return chat_manager.make_response_with_session({
@@ -449,7 +363,22 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 
         except Exception as e:
             logger.error(f"Error processing message for session {session_id}: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = ChatMessage(
+                message=f"Error: {str(e)}",
+                timestamp=datetime.now().isoformat(),
+                sender="system"
+            )
+            chat_manager.chat_history[session_id].append(error_msg)
+            
+            return chat_manager.make_response_with_session({
+                "status": "error",
+                "message": str(e)
+            }, web_session_id, request)
+
+    # Set reference so scheduler can call the same chat processing function
+    scheduler.chat_endpoint_func = chat_endpoint
+    
+    
 
     @app.post("/web/sessions/{session_id}/schedule")
     async def create_task(session_id: str, request: ScheduleRequest):
@@ -472,11 +401,45 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             raise HTTPException(status_code=400, detail=message)
 
     @app.get("/web/sessions/{session_id}/tasks")
-    async def get_session_tasks(session_id: str):
-        """Get scheduled tasks for a specific session"""
-        tasks = scheduler.get_scheduled_tasks(session_id)
-        logger.info(f"GET /web/sessions/{session_id}/tasks - Returned {len(tasks)} tasks")
-        return {"tasks": tasks}
+    async def stream_session_tasks(session_id: str):
+        """Stream scheduled tasks and new messages for a specific session via SSE"""
+        
+        async def event_stream():
+            # Start with current message count to avoid re-sending existing messages
+            current_messages = chat_manager.chat_history.get(session_id, [])
+            last_sent_message_count = len(current_messages)
+            
+            while True:
+                try:
+                    # Get current tasks
+                    tasks = scheduler.get_scheduled_tasks(session_id)
+                    
+                    # Send task updates
+                    tasks_data = {"type": "tasks", "data": tasks}
+                    yield f"data: {json.dumps(tasks_data)}\n\n"
+                    
+                    # Check for new messages
+                    current_messages = chat_manager.chat_history.get(session_id, [])
+                    current_count = len(current_messages)
+                    
+                    if current_count > last_sent_message_count:
+                        logger.info(f"SSE detected new messages for session {session_id}: {current_count} > {last_sent_message_count}")
+                        # Send new messages since last check
+                        new_messages = current_messages[last_sent_message_count:]
+                        messages_data = {"type": "messages", "data": [msg.__dict__ for msg in new_messages]}
+                        yield f"data: {json.dumps(messages_data)}\n\n"
+                        last_sent_message_count = current_count
+                    
+                    # Wait before next update
+                    await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(f"SSE stream error for session {session_id}: {e}")
+                    break
+        
+        logger.info(f"SSE stream started for session {session_id}")
+        return StreamingResponse(event_stream(), media_type="text/event-stream", 
+                               headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
 
     @app.get("/web/tasks")
     async def get_all_tasks():
@@ -529,11 +492,11 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             "scheduler_running": scheduler.scheduler_running,
             "task_queue_running": scheduler.running,
             "total_sessions": len(scheduler.chat_sessions),
-            "active_sse_queues": len(chat_manager.sse_queues),
+            "chat_history_sessions": len(chat_manager.chat_history),
             "available_sessions": chat_manager.get_available_sessions(web_session_id),
             "web_session_id": web_session_id
         }
-        logger.info(f"GET /web/status - {status['total_sessions']} sessions, {status['active_sse_queues']} SSE queues")
+        logger.info(f"GET /web/status - {status['total_sessions']} sessions, {status['chat_history_sessions']} chat histories")
         return chat_manager.make_response_with_session(status, web_session_id, request)
 
     @app.post("/web/sessions/new")
@@ -622,8 +585,23 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 logger.warning(f"GET /web/sessions/{session_id}/history - Access denied for web session {web_session_id[:8]}...")
                 raise HTTPException(status_code=403, detail="Access denied to this session")
         
-        # Get chat history from server memory
-        chat_history = chat_manager.chat_history.get(int(session_id), [])
+        # Get chat history from web interface - fix the core broadcast issue instead
+        chat_history = chat_manager.chat_history.get(session_id, [])
+        
+        # If no history found with string key, try integer key as fallback  
+        if not chat_history:
+            try:
+                int_session_id = int(session_id)
+                chat_history = chat_manager.chat_history.get(int_session_id, [])
+                if chat_history:
+                    # Move history to string key for consistency
+                    chat_manager.chat_history[session_id] = chat_history
+                    del chat_manager.chat_history[int_session_id]
+                    logger.info(f"Migrated history from integer key {int_session_id} to string key '{session_id}'")
+            except ValueError:
+                pass  # session_id is not a valid integer
+        
+        
         history_data = [msg.model_dump() for msg in chat_history]
         
         logger.info(f"GET /web/sessions/{session_id}/history - Returned {len(history_data)} messages")
@@ -657,9 +635,14 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         else:
             history_count = 0
         
-        # Clear any SSE queues for this session
-        if session_id in chat_manager.sse_queues:
-            del chat_manager.sse_queues[session_id]
+        # HTTP-only architecture, no persistent connections to clean
+        
+        # Remove session from web session mappings
+        for web_session_id, agent_sessions in chat_manager.web_session_agents.items():
+            if session_id in agent_sessions:
+                agent_sessions.remove(session_id)
+                logger.info(f"Removed session {session_id} from web session {web_session_id}")
+                break
         
         logger.info(f"Session {session_id} cleaned up - {cleared_tasks} tasks, {history_count} history entries")
         

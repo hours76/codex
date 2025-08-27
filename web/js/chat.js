@@ -17,7 +17,7 @@ let activeSessionId = null;  // Will be set to unique timestamp
 let nextSessionId = null;    // Will be set to unique timestamp + 1
 let sessionRecoveryAttempted = false;
 
-// Sessions will be initialized in initializePage() to prevent early WebSocket connections
+// Sessions will be initialized in initializePage()
 
 // Get base path from global variable (injected by server)
 function getBasePath() {
@@ -38,7 +38,7 @@ function apiUrl(path) {
     return `${basePath}${path}`;
 }
 
-// Initialize session (no persistent connection needed)
+// Initialize session for HTTP request/response
 function connectSession(sessionId) {
     // Update tab and session name to show ready state
     const last4Digits = sessionId.toString().slice(-4);
@@ -49,17 +49,19 @@ function connectSession(sessionId) {
         tab.textContent = sessionName;
     }
     
-    // Update session object name
-    if (sessions[sessionId]) {
-        sessions[sessionId].name = sessionName;
+    // Create session object if it doesn't exist
+    if (!sessions[sessionId]) {
+        sessions[sessionId] = {};
     }
+    
+    sessions[sessionId].name = sessionName;
+    sessions[sessionId].connected = true;
     
     // Update UI if this is the active session
     if (sessionId === activeSessionId) {
         messageInput.disabled = false;
         sendButton.disabled = false;
     }
-    
 }
 
 // Attempt session recovery from server
@@ -79,6 +81,10 @@ async function attemptSessionRecovery() {
             
             // Proceed with recovery if any sessions exist
             if (meaningfulSessions.length > 0) {
+                
+                // Remember currently active session before clearing (from localStorage)
+                const previousActiveSession = localStorage.getItem('lastActiveSession');
+                console.log('Previous active session from localStorage:', previousActiveSession);
                 
                 // Clear current session and UI
                 sessions = {};
@@ -101,8 +107,6 @@ async function attemptSessionRecovery() {
                     sessions[sessionId] = {
                         id: sessionId,
                         name: `Chat ${sessionId}`,
-                        messages: [],
-                        eventSource: null,
                         existsOnServer: true  // Recovered from server
                     };
                     
@@ -113,7 +117,13 @@ async function attemptSessionRecovery() {
                     // Update session UI to show it's ready
                     connectSession(sessionId);
                     
-                    if (!hasActiveSessions) {
+                    // Set as active session if it was the previously active one, or if no active session set yet
+                    if (sessionId === parseInt(previousActiveSession)) {
+                        console.log('Restoring previous active session:', sessionId);
+                        activeSessionId = sessionId;
+                        hasActiveSessions = true;
+                    } else if (!hasActiveSessions) {
+                        console.log('Setting first session as active:', sessionId);
                         activeSessionId = sessionId;
                         hasActiveSessions = true;
                     }
@@ -133,6 +143,18 @@ async function attemptSessionRecovery() {
 // Load chat history for a session from server
 async function loadSessionHistory(sessionId) {
     try {
+        // IMPORTANT: Clear client cache FIRST before making API call
+        // Client cache and server history are mutually exclusive
+        if (sessions[sessionId]) {
+            sessions[sessionId].messages = [];  // Clear client cache immediately
+            
+            // Clear the chat area to prevent duplicates
+            const chatArea = document.getElementById(`chat-area-${sessionId}`);
+            if (chatArea) {
+                chatArea.innerHTML = '';
+            }
+        }
+        
         const response = await fetch(apiUrl(`/web/sessions/${sessionId}/history`), {
             credentials: 'same-origin'
         });
@@ -141,25 +163,23 @@ async function loadSessionHistory(sessionId) {
             const data = await response.json();
             const history = data.history || [];
             
-            // Clear current messages and load from server
             if (sessions[sessionId]) {
-                sessions[sessionId].messages = [];
                 
-                // Add each message to the session and display
+                // Step 1: Load ALL history into cache first
                 for (const msgData of history) {
                     const message = {
                         message: msgData.message,
                         sender: msgData.sender,
                         timestamp: msgData.timestamp
                     };
+                    // Rebuild client cache from server data
                     sessions[sessionId].messages.push(message);
-                    
-                    // Display message if this is the active session
-                    if (sessionId == activeSessionId) {
-                        addMessageToSession(sessionId, message);
-                    }
                 }
                 
+                // Step 2: Then display cache
+                for (const message of sessions[sessionId].messages) {
+                    addMessageToSession(sessionId, message);
+                }
             }
         } else {
             console.warn(`Failed to load history for session ${sessionId}:`, response.status);
@@ -180,7 +200,6 @@ async function createNewSession() {
         sessions[tempSessionId] = {
             id: tempSessionId,
             name: `Init...`,
-            messages: [],
             existsOnServer: false  // New session, not created on server yet
         };
         
@@ -210,9 +229,7 @@ async function createNewSession() {
             delete sessions[tempSessionId];
             sessions[newSessionId] = {
                 id: newSessionId,
-                name: `Init...`,
-                messages: [],
-                eventSource: null
+                name: `Init...`
             };
             
             // Update DOM elements with real session ID
@@ -262,7 +279,7 @@ async function createNewSession() {
     }
 }
 
-// WebSocket connection removed - using SSE only
+// Using simple HTTP request/response pattern
 function loadTasksAfterRecovery() {
     // Load tasks when first session connects
     if (Object.keys(sessions).length > 0) {
@@ -310,17 +327,64 @@ function addMessageToSession(sessionId, message) {
     chatArea.scrollTop = chatArea.scrollHeight;
 }
 
+// Add typing indicator message
+function addTypingMessage(sessionId, message) {
+    const chatArea = document.getElementById(`chat-area-${sessionId}`);
+    if (!chatArea) return null;
+    
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${message.sender}-message typing`;
+    
+    const messageText = document.createElement('div');
+    messageText.className = 'message-content typing-cursor';
+    messageText.innerHTML = ''; // Empty content with typing cursor
+    
+    const timestamp = document.createElement('div');
+    timestamp.className = 'timestamp';
+    timestamp.textContent = new Date(message.timestamp).toLocaleTimeString();
+    
+    messageDiv.appendChild(messageText);
+    messageDiv.appendChild(timestamp);
+    chatArea.appendChild(messageDiv);
+    
+    chatArea.scrollTop = chatArea.scrollHeight;
+    
+    return messageDiv;
+}
+
 // Send chat message
 async function sendMessage() {
     const message = messageInput.value.trim();
     
     if (message && activeSessionId) {
         try {
+            // Step 1: Write to client cache FIRST (sequential data flow)
+            const userMessage = {
+                message: message,
+                sender: 'user',
+                timestamp: new Date().toISOString()
+            };
+            if (!sessions[activeSessionId].messages) {
+                sessions[activeSessionId].messages = [];
+            }
+            sessions[activeSessionId].messages.push(userMessage);
+            
+            // Step 2: Display user message (after cache)
+            addMessageToSession(activeSessionId, userMessage);
+            
             messageInput.value = '';  // Clear input immediately
             messageInput.disabled = true;
             sendButton.disabled = true;
             
-            // Send message via POST with SSE response
+            // Show typing indicator
+            const typingMessage = {
+                message: '',
+                sender: 'assistant',
+                timestamp: new Date().toISOString()
+            };
+            const typingMessageDiv = addTypingMessage(activeSessionId, typingMessage);
+            
+            // Send message via HTTP and get AI response
             const response = await fetch(apiUrl('/web/chat'), {
                 method: 'POST',
                 headers: {
@@ -334,42 +398,19 @@ async function sendMessage() {
             });
             
             if (response.ok) {
-                // Handle SSE response
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    
-                    const chunk = decoder.decode(value, { stream: true });
-                    const lines = chunk.split('\n');
-                    
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            try {
-                                const data = JSON.parse(line.slice(6));
-                                if (data.done) {
-                                    // Stream is complete
-                                    break;
-                                } else if (data.error) {
-                                    showNotification(`AI Error: ${data.error}`, 'error');
-                                } else {
-                                    // Add message to session
-                                    addMessageToSession(activeSessionId, data);
-                                    sessions[activeSessionId].messages.push(data);
-                                }
-                            } catch (e) {
-                                console.error('Error parsing SSE data:', e);
-                            }
-                        }
-                    }
-                }
+                // Message sent successfully - AI response will come via SSE
+                console.log('Message sent successfully, waiting for SSE response...');
+                // Keep typing indicator active until SSE delivers assistant response
             } else {
                 const error = await response.text();
+                // Remove typing indicator on error
+                typingMessageDiv.remove();
                 showNotification(`Failed to send message: ${error}`, 'error');
             }
+            
         } catch (error) {
+            // Remove typing indicator on error
+            typingMessageDiv.remove();
             showNotification(`Failed to send message: ${error}`, 'error');
         } finally {
             messageInput.disabled = false;
@@ -429,9 +470,11 @@ async function addNewTab() {
 function switchToTab(sessionId) {
     // Update active session
     activeSessionId = sessionId;
+    // Remember the active session for after page reload
+    localStorage.setItem('lastActiveSession', sessionId);
     
-    // Load history if not already loaded AND session exists on server
-    if (sessions[sessionId] && sessions[sessionId].messages.length === 0 && sessions[sessionId].existsOnServer) {
+    // Load history if not already loaded
+    if (sessions[sessionId] && (!sessions[sessionId].messages || sessions[sessionId].messages.length === 0)) {
         loadSessionHistory(sessionId);
     }
     
@@ -476,7 +519,11 @@ async function closeTab(sessionId) {
         // Continue with closing the original tab
     }
     
-    // No connections to close (using SSE)
+    // Close SSE connection if this is the active session
+    if (sessionId === activeSessionId && taskEventSource) {
+        taskEventSource.close();
+        taskEventSource = null;
+    }
     
     // Delete session on server side
     try {
@@ -547,17 +594,120 @@ async function scheduleTask() {
     }
 }
 
-// Load and display tasks for active session
-async function loadTasks() {
+// SSE connection for real-time tasks and messages
+let taskEventSource = null;
+
+// Load and display tasks for active session using SSE
+let loadTasksTimeout;
+function loadTasks() {
+    // Debounce to prevent duplicate calls
+    clearTimeout(loadTasksTimeout);
+    loadTasksTimeout = setTimeout(() => {
+        _loadTasksInternal();
+    }, 100);
+}
+
+function _loadTasksInternal() {
+    // Close existing SSE connection if any
+    if (taskEventSource) {
+        taskEventSource.close();
+        taskEventSource = null;
+    }
+    
+    if (!activeSessionId) {
+        console.warn('No active session for tasks');
+        return;
+    }
+    
     try {
-        const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/tasks`));
-        const data = await response.json();
+        // Open SSE connection for real-time updates
+        taskEventSource = new EventSource(apiUrl(`/web/sessions/${activeSessionId}/tasks`));
         
-        displayTasks(data.tasks);
-        taskCount.textContent = data.tasks.length;
+        taskEventSource.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === 'tasks') {
+                    // Update tasks display in real-time
+                    displayTasks(data.data);
+                    taskCount.textContent = data.data.length;
+                } else if (data.type === 'messages') {
+                    // Display scheduled user messages and assistant responses from SSE
+                    for (const message of data.data) {
+                        // Display scheduled user messages (those starting with [AGENT])
+                        if (message.sender === 'user' && message.message.startsWith('[AGENT]')) {
+                            // Display the scheduled user message
+                            addMessageToSession(activeSessionId, message);
+                            
+                            // Create typing indicator for assistant response (same as manual messages)
+                            const typingMessage = {
+                                message: '',
+                                sender: 'assistant',
+                                timestamp: new Date().toISOString()
+                            };
+                            const typingMessageDiv = addTypingMessage(activeSessionId, typingMessage);
+                        }
+                        // Display assistant responses via SSE
+                        else if (message.sender === 'assistant') {
+                            // Step 1: Write to client cache FIRST (sequential data flow)
+                            if (!sessions[activeSessionId].messages) {
+                                sessions[activeSessionId].messages = [];
+                            }
+                            sessions[activeSessionId].messages.push(message);
+                            
+                            // Step 2: Check if there's a typing indicator to replace
+                            const typingIndicators = document.querySelectorAll(`#chat-area-${activeSessionId} .message.typing`);
+                            const latestTypingIndicator = typingIndicators[typingIndicators.length - 1];
+                            
+                            if (latestTypingIndicator) {
+                                // Replace typing indicator with new message
+                                const messageContent = latestTypingIndicator.querySelector('.message-content');
+                                if (messageContent) {
+                                    // Format and display the response
+                                    let formattedResponse = message.message
+                                        .replace(/&/g, '&amp;')
+                                        .replace(/</g, '&lt;')
+                                        .replace(/>/g, '&gt;')
+                                        .replace(/"/g, '&quot;')
+                                        .replace(/'/g, '&#039;')
+                                        .replace(/\n/g, '<br>');
+                                    
+                                    messageContent.innerHTML = formattedResponse;
+                                    messageContent.classList.remove('typing-cursor');
+                                    
+                                    // Update timestamp
+                                    const timestampElement = latestTypingIndicator.querySelector('.timestamp');
+                                    if (timestampElement) {
+                                        timestampElement.textContent = new Date().toLocaleTimeString();
+                                    }
+                                    
+                                    // Remove typing class
+                                    latestTypingIndicator.classList.remove('typing');
+                                }
+                            } else {
+                                // No typing indicator, just add as new message
+                                addMessageToSession(activeSessionId, message);
+                            }
+                        }
+                        // Ignore all other message types (user, system, etc.)
+                    }
+                }
+            } catch (parseError) {
+                console.error('Error parsing SSE data:', parseError);
+            }
+        };
+        
+        taskEventSource.onerror = function(error) {
+            console.error('SSE error:', error);
+            // Don't show notification for every error to avoid spam
+        };
+        
+        taskEventSource.onopen = function() {
+            console.log('SSE connection opened for session', activeSessionId);
+        };
         
     } catch (error) {
-        console.error('Error loading tasks:', error);
+        console.error('Error setting up SSE for tasks:', error);
         showNotification('Error loading tasks', 'error');
     }
 }
@@ -579,14 +729,13 @@ function displayTasks(tasks) {
         const lastRun = task.last_run ? new Date(task.last_run) : null;
         
         taskDiv.innerHTML = `
-            <div class="task-schedule">${task.schedule_spec}</div>
+            <div class="task-schedule">
+                ${task.schedule_spec}
+                <span class="task-delete" onclick="deleteTask(${index})" title="Delete task" style="float: right; cursor: pointer;">🗑</span>
+            </div>
             <div class="task-message">${task.message}</div>
             <div class="task-next-run">
-                Next: ${nextRun.toLocaleString()}
-                ${lastRun ? `<br>Last: ${lastRun.toLocaleString()}` : ''}
-            </div>
-            <div class="task-actions">
-                <button class="delete-task" onclick="deleteTask(${index})">Delete</button>
+                ${lastRun ? `Last: ${lastRun.toLocaleString()}<br>` : ''}Next: ${nextRun.toLocaleString()}
             </div>
         `;
         
@@ -748,7 +897,16 @@ async function refreshPlans() {
     }
 }
 
+let loadPlansTimeout;
 async function loadSavedPlans() {
+    // Debounce to prevent duplicate calls
+    clearTimeout(loadPlansTimeout);
+    loadPlansTimeout = setTimeout(() => {
+        _loadSavedPlansInternal();
+    }, 100);
+}
+
+async function _loadSavedPlansInternal() {
     try {
         const response = await fetch(apiUrl('/web/task-plans'));
         if (response.ok) {
@@ -763,7 +921,16 @@ async function loadSavedPlans() {
     }
 }
 
+let displayPlansTimeout;
 async function displayCurrentPlans(plans) {
+    // Debounce to prevent duplicate calls
+    clearTimeout(displayPlansTimeout);
+    displayPlansTimeout = setTimeout(() => {
+        _displayCurrentPlansInternal(plans);
+    }, 100);
+}
+
+async function _displayCurrentPlansInternal(plans) {
     const currentPlansList = document.getElementById('current-plans-list');
     
     try {
@@ -929,8 +1096,7 @@ document.addEventListener('click', function(e) {
     }
 });
 
-// Auto-refresh tasks every 30 seconds
-setInterval(loadTasks, 30000);
+// SSE replaces polling - no need for setInterval
 
 // Initialize page: attempt recovery then connect sessions
 async function initializePage() {
@@ -967,3 +1133,5 @@ async function initializePage() {
 
 // Initialize on page load
 initializePage();
+
+

@@ -179,7 +179,8 @@ body {
     text-align: right;
 }
 
-.ai-message {
+.ai-message,
+.assistant-message {
     background-color: #e9ecef;
     color: #333;
     margin-right: auto;
@@ -200,6 +201,19 @@ body {
     margin-right: 0 !important;
     text-align: right !important;
     border: 2px solid #5a369c !important;
+    border-radius: 15px !important;
+    font-size: 0.9em !important;
+    max-width: 60% !important;
+    display: block !important;
+    position: relative !important;
+}
+
+.agent-message {
+    background-color: #17a2b8 !important;
+    color: white !important;
+    margin-left: auto !important;
+    margin-right: 0 !important;
+    text-align: right !important;
     border-radius: 15px !important;
     font-size: 0.9em !important;
     max-width: 60% !important;
@@ -744,4 +758,23 @@ body {
 .tab:hover:not(.active) {
     background: linear-gradient(135deg, #7a8288, #5a6268);
     transform: translateY(-1px);
+}
+
+/* Typing indicator */
+.typing-cursor {
+    min-height: 24px;
+    min-width: 20px;
+    background-color: #e9ecef;
+}
+
+.typing-cursor::after {
+    content: '|';
+    animation: blink 1s infinite;
+    color: #333;
+    font-weight: normal;
+}
+
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
 }

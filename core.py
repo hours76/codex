@@ -76,10 +76,18 @@ class ChatSession:
             
         return headers
     
-    async def send_message(self, message: str) -> str:
-        """Send message to chat API and get response with retry logic"""
+    async def send_message(self, message: str, stream_callback=None) -> str:
+        """Send message to chat API and get response with retry logic
+        
+        Args:
+            message: The message to send
+            stream_callback: Optional async callback for streaming chunks
+        """
         async with self.lock:
-            return await self._send_message_with_retry(message)
+            if stream_callback:
+                return await self._send_message_streaming(message, stream_callback)
+            else:
+                return await self._send_message_with_retry(message)
     
     async def _send_message_with_retry(self, message: str, attempt: int = 0) -> str:
         """Internal method to send message with retry logic"""
@@ -100,7 +108,7 @@ class ChatSession:
             
             payload = {
                 "messages": [{"role": "user", "content": message}],
-                "stream": False
+                "stream": False  # Non-streaming mode
             }
             
             if self.debug_mode:
@@ -179,6 +187,70 @@ class ChatSession:
         except Exception as e:
             logger.error(f"Unexpected API error for session {self.session_id}: {type(e).__name__}: {e}")
             return f"Error: Unexpected error - {type(e).__name__}: {str(e)[:100]}"
+    
+    async def _send_message_streaming(self, message: str, stream_callback) -> str:
+        """Send message and stream the response from external API"""
+        try:
+            if not self.http_session:
+                success = await self.start()
+                if not success:
+                    return f"Error: No HTTP session available for {self.session_id}"
+            
+            # Prepare API request for streaming
+            api_url = os.environ.get("CHAT_API_BASE_URL", get_config("chat_api.base_url"))
+            endpoint = f"{api_url}/api/chat"
+            
+            headers = await self._get_api_headers()
+            
+            payload = {
+                "messages": [{"role": "user", "content": message}],
+                "stream": True  # Enable streaming
+            }
+            
+            if self.debug_mode:
+                logger.debug(f"Session {self.session_id} streaming request: {endpoint}")
+            
+            full_response = ""
+            
+            async with self.http_session.post(endpoint, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    # Process streaming response from external API
+                    async for line in response.content:
+                        if line:
+                            decoded = line.decode('utf-8').strip()
+                            if decoded.startswith('data: '):
+                                try:
+                                    data = json.loads(decoded[6:])  # Skip 'data: ' prefix
+                                    
+                                    if 'choices' in data and data['choices']:
+                                        delta = data['choices'][0].get('delta', {})
+                                        content = delta.get('content', '')
+                                        
+                                        if content:
+                                            full_response += content
+                                            # Send chunk to callback for real-time display
+                                            if stream_callback:
+                                                await stream_callback(content)
+                                    
+                                    # Check if stream is done
+                                    if 'choices' in data and data['choices']:
+                                        if data['choices'][0].get('finish_reason'):
+                                            break
+                                            
+                                except json.JSONDecodeError:
+                                    # Skip non-JSON lines from streaming response
+                                    pass
+                    
+                    return full_response.strip() if full_response else "(No response content)"
+                    
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Streaming API error {response.status}: {error_text[:200]}")
+                    return f"Error: API request failed ({response.status}): {error_text[:200]}"
+                    
+        except Exception as e:
+            logger.error(f"Streaming error for session {self.session_id}: {e}")
+            return f"Error: Streaming failed - {str(e)[:100]}"
     
     async def restart_process(self):
         """Restart the HTTP session"""
@@ -277,16 +349,16 @@ class TaskScheduler:
         """Get chat session for a specific session ID"""
         return self.chat_sessions.get(session_id)
     
-    async def agent_ask_async(self, session_id: str, question: str, task_type: str = "user"):
-        """Direct AI interaction for specific session"""
+    async def agent_ask_async(self, session_id: str, question: str, task_type: str = "user", stream_callback=None):
+        """Direct AI interaction for specific session with optional streaming"""
         _ = task_type  # Parameter kept for API compatibility
-        return await self.send_message_to_session(session_id, question)
+        return await self.send_message_to_session(session_id, question, stream_callback)
 
-    async def send_message_to_session(self, session_id: str, message: str):
-        """Send a message directly to a chat session"""
+    async def send_message_to_session(self, session_id: str, message: str, stream_callback=None):
+        """Send a message directly to a chat session with optional streaming"""
         session = self.get_chat_session(session_id)
         if session:
-            return await session.send_message(message)
+            return await session.send_message(message, stream_callback)
         else:
             return f"Error: No chat session found for {session_id}"
 
@@ -410,24 +482,41 @@ class TaskScheduler:
                 task_type, session_id, message = task
                 
                 if task_type == 'scheduled':
-                    # First, broadcast the scheduled message immediately
+                    # Same logic as /web/chat endpoint
                     if hasattr(self, 'chat_manager_ref') and self.chat_manager_ref:
-                        await self.chat_manager_ref.broadcast_scheduled_question(session_id, message)
-                    
-                    truncate_len = get_config("limits.message_truncation_length")
-                    logger.info(f"Scheduled prompt sent to session {session_id}: {message[:truncate_len]}...")
-                    
-                    # Then get the AI response (this takes time)
-                    response = await self.agent_ask_async(session_id, message, "scheduled")
-                    
-                    # Finally, broadcast the response when received
-                    if hasattr(self, 'chat_manager_ref') and self.chat_manager_ref:
-                        await self.chat_manager_ref.broadcast_ai_response(session_id, response)
-                    
-                    # Monitor the response and potentially inject follow-up
-                    await self.task_monitor.monitor_scheduled_response(
-                        session_id, message, response, scheduler_ref=self
-                    )
+                        from datetime import datetime
+                        from models import ChatMessage
+                        
+                        # 1. Store user message (same as /web/chat)
+                        user_msg = ChatMessage(
+                            message=f"[AGENT] {message}",
+                            sender="user", 
+                            timestamp=datetime.now().isoformat()
+                        )
+                        if session_id not in self.chat_manager_ref.chat_history:
+                            self.chat_manager_ref.chat_history[session_id] = []
+                        self.chat_manager_ref.chat_history[session_id].append(user_msg)
+                        
+                        # 2. Get AI response (same as /web/chat)
+                        response = await self.chat_manager_ref.ask_ai(session_id, message)
+                        
+                        # 3. Store AI response (same as /web/chat) 
+                        if response and response.strip():
+                            ai_msg = ChatMessage(
+                                message=response,
+                                sender="assistant",
+                                timestamp=datetime.now().isoformat()
+                            )
+                            self.chat_manager_ref.chat_history[session_id].append(ai_msg)
+                            
+                            # 4. Trigger SSE broadcast (what manual messages do)
+                            # The SSE polling will detect these new messages and send them
+                            truncate_len = get_config("limits.message_truncation_length")
+                            logger.info(f"Scheduled AI response stored for session {session_id}: {response[:truncate_len]}...")
+                            
+                            await self.task_monitor.monitor_scheduled_response(
+                                session_id, message, response, scheduler_ref=self
+                            )
                 
                 self.task_queue.task_done()
                     
@@ -447,16 +536,13 @@ class TaskScheduler:
     async def run_scheduler(self):
         """Run the scheduler in background for all sessions"""
         logger.info("Scheduler started")
+        
         while self.scheduler_running and self.running:
             now = datetime.now()
             
             # Check tasks for all sessions
             for session_id, tasks in self.scheduled_tasks.items():
-                _ = session_id  # Used for iteration only
                 for task in tasks[:]:
-                    time_diff = (task['next_run'] - now).total_seconds()
-                    _ = time_diff  # Calculated but not used in current logic
-                    
                     if now >= task['next_run'] and not task['is_running']:
                         task['is_running'] = True
                         asyncio.create_task(self._execute_scheduled_task(task))

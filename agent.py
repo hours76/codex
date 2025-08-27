@@ -59,6 +59,7 @@ def main():
     host = get_config("server.host")
     port = get_config("server.port")
     logger.info(f"Web Interface: http://{host}:{port}")
+    logger.info("Note: X-Forwarded-Prefix header supported for reverse proxy")
     logger.info("Press Ctrl+C to stop")
     
     # Initialize components
@@ -94,6 +95,10 @@ def main():
     log_config["formatters"]["default"]["fmt"] = "[WEB] %(message)s"
     log_config["formatters"]["access"]["fmt"] = "[WEB] %(message)s"
     
+    # Wrap app with ProxyHeadersMiddleware to handle X-Forwarded-* headers
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+    app = ProxyHeadersMiddleware(app, trusted_hosts=["*"])
+    
     # Start the server with configuration
     uvicorn.run(
         app, 
@@ -101,8 +106,14 @@ def main():
         port=port,
         log_config=log_config,
         access_log=get_config("server.access_log"),
-        log_level=get_config("server.log_level")
+        log_level=get_config("server.log_level"),
+        forwarded_allow_ips="*"  # Allow forwarded headers from any IP
     )
+
+# Create app instance for WSGI/ASGI servers
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+_raw_app = create_app_instance()
+app = ProxyHeadersMiddleware(_raw_app, trusted_hosts=["*"])
 
 if __name__ == "__main__":
     main()

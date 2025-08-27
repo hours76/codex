@@ -148,7 +148,10 @@ class TaskMonitor:
                             timestamp=datetime.now().isoformat(),
                             sender="system"
                         )
-                        await scheduler_ref.chat_manager_ref.broadcast_to_session(session_id, auto_prompt_msg)
+                        # Store auto-prompt message directly in chat history
+                        if session_id not in scheduler_ref.chat_manager_ref.chat_history:
+                            scheduler_ref.chat_manager_ref.chat_history[session_id] = []
+                        scheduler_ref.chat_manager_ref.chat_history[session_id].append(auto_prompt_msg)
                     
                     # Send prompt to AI and get response
                     follow_up_response = await scheduler_ref.send_message_to_session(session_id, proceed_prompt)
@@ -158,9 +161,10 @@ class TaskMonitor:
                         ai_response_msg = ChatMessage(
                             message=follow_up_response,
                             timestamp=datetime.now().isoformat(),
-                            sender="ai"
+                            sender="assistant"
                         )
-                        await scheduler_ref.chat_manager_ref.broadcast_to_session(session_id, ai_response_msg)
+                        # Store AI response directly in chat history
+                        scheduler_ref.chat_manager_ref.chat_history[session_id].append(ai_response_msg)
                     
                     logger.info(f"Follow-up sent for session {session_id}: {follow_up_response[:truncate_len]}...")
                     
@@ -208,7 +212,10 @@ class TaskMonitor:
                             timestamp=datetime.now().isoformat(),
                             sender="system"
                         )
-                        await scheduler_ref.chat_manager_ref.broadcast_to_session(session_id, auto_prompt_msg)
+                        # Store auto-prompt message directly in chat history
+                        if session_id not in scheduler_ref.chat_manager_ref.chat_history:
+                            scheduler_ref.chat_manager_ref.chat_history[session_id] = []
+                        scheduler_ref.chat_manager_ref.chat_history[session_id].append(auto_prompt_msg)
                     
                     # Send prompt to AI and get response
                     follow_up_response = await scheduler_ref.send_message_to_session(session_id, proceed_prompt)
@@ -218,9 +225,10 @@ class TaskMonitor:
                         ai_response_msg = ChatMessage(
                             message=follow_up_response,
                             timestamp=datetime.now().isoformat(),
-                            sender="ai"
+                            sender="assistant"
                         )
-                        await scheduler_ref.chat_manager_ref.broadcast_to_session(session_id, ai_response_msg)
+                        # Store AI response directly in chat history
+                        scheduler_ref.chat_manager_ref.chat_history[session_id].append(ai_response_msg)
                     
                     logger.info(f"Follow-up sent for session {session_id}: {follow_up_response[:truncate_len]}...")
                     

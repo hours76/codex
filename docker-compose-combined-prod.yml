@@ -10,7 +10,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - BASE_PATH=/msg
     volumes:
       - ./msg-server/data:/app/data
       - ./msg-server/config:/app/config:ro
@@ -25,10 +24,9 @@ services:
       - ./chat-server/config:/app/config:ro
       - ./chat-server/data:/app/data
     environment:
-      - BASE_PATH=/chat
       - PYTHONPATH=/app
       - FLASK_ENV=production
-      - MSG_SERVER_URL=http://msg-server:3000/msg  # Direct container communication
+      - MSG_SERVER_URL=http://msg-server:3000/  # Direct container communication
     restart: unless-stopped
     depends_on:
       - msg-server
@@ -42,11 +40,10 @@ services:
       - ./agent-server/config:/app/config:ro
       - ./agent-server/data:/app/data
     environment:
-      - BASE_PATH=/agent
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - PYTHONIOENCODING=utf-8
-      - CHAT_API_BASE_URL=http://chat-server:4000
+      - CHAT_API_BASE_URL=http://chat-server:4000/
     restart: unless-stopped
     depends_on:
       - chat-server

@@ -6,12 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Interactive Agent Console - A comprehensive web-based and API-driven agent system that provides interactive access to a chat system with MCP tool integration located in `../rag/`. The agent provides:
 
-- **Web Interface**: Full-featured HTML/CSS/JS chat interface with real-time WebSocket communication
+- **Web Interface**: Full-featured HTML/CSS/JS chat interface with HTTP request/response communication
 - **REST API**: Complete FastAPI-based REST endpoints for programmatic access
 - **Session Management**: Multi-session support with independent chat histories and task scheduling
-- **Task Scheduling**: Automated messages at intervals or specific times per session
+- **Task Scheduling**: Automated messages at intervals or specific times per session with real-time display
 - **MCP Integration**: Seamless tool integration through chat.py subprocess
 - **Subprocess IPC**: Stable binary-safe communication using asyncio.subprocess.PIPE
+- **Real-time Updates**: Server-Sent Events (SSE) for live message and task updates
+- **Reverse Proxy Support**: X-Forwarded-Prefix header support for deployment flexibility
 
 ## Dependencies
 
@@ -76,7 +78,7 @@ The application is organized into separate modules for better maintainability:
    - Automatic process restart on timeout
 
 3. **`web.py`**: Web interface and API endpoints
-   - **ChatManager Class**: WebSocket and session management
+   - **ChatManager Class**: HTTP session and message storage management
    - FastAPI route definitions with comprehensive logging
    - Session recovery and cleanup
    - Real-time message broadcasting
@@ -105,7 +107,7 @@ The application is organized into separate modules for better maintainability:
 
 #### Session Management
 - **Multi-session support**: Independent chat processes and histories per session
-- **WebSocket per session**: Real-time bidirectional communication
+- **HTTP request/response**: Simple and reliable communication pattern
 - **Session recovery**: Persistent chat history and process management
 - **Session cleanup**: Automatic cleanup of inactive sessions
 
@@ -115,12 +117,16 @@ The application is organized into separate modules for better maintainability:
 - **Smart execution**: Immediate when free, queued when busy
 - **Prevent duplicates**: `is_running` flag blocks overlapping tasks per session
 - **Strict intervals**: Maintains original schedule regardless of execution time
+- **Unified processing**: Scheduled tasks use the same entry point as manual user input
+- **Real-time display**: Tasks appear instantly in web interface via SSE
+- **Session persistence**: Active tab maintained across page reloads using localStorage
 
 #### Web Interface
-- **Modern HTML5**: Clean responsive design with WebSocket integration
-- **Real-time updates**: Live chat updates without page refresh
-- **Session switching**: Easy navigation between multiple chat sessions
-- **Task management**: Web-based scheduling interface
+- **Modern HTML5**: Clean responsive design with HTTP communication
+- **Real-time updates**: Server-Sent Events (SSE) for live message and task display
+- **Session switching**: Easy navigation between multiple chat sessions with persistent focus
+- **Task management**: Web-based scheduling interface with real-time status updates
+- **Reverse proxy ready**: X-Forwarded-Prefix header support for deployment flexibility
 
 ### Integration Points
 - **Chat System Path**: `../rag/venv/bin/python -u ../rag/chat.py --mcp`
@@ -134,8 +140,8 @@ The application is organized into separate modules for better maintainability:
 - `GET /` - Main chat web interface
 - `GET /static/*` - Static assets (CSS, JS)
 
-### WebSocket
-- `WS /ws/{session_id}` - Real-time chat communication per session
+### Chat API  
+- `POST /web/chat` - Send message and get response
 
 ### REST API
 - `POST /api/sessions/{session_id}/schedule` - Schedule tasks for session
@@ -156,10 +162,29 @@ The application is organized into separate modules for better maintainability:
 - Automatic MCP tool integration (handled by chat.py)
 
 ### Web Interface Features
-- Real-time chat with WebSocket
+- Interactive chat with HTTP requests
 - Multiple session management
 - Task scheduling via web UI
 - Session history persistence
+
+## Recent Updates
+
+### Scheduled Tasks Real-time Display
+- **Unified Processing**: Scheduled tasks now use the same entry point as manual user input
+- **Real-time Updates**: Tasks and responses appear instantly via SSE without page reload
+- **Visual Indicators**: Proper typing indicators for scheduled message responses
+- **Session Consistency**: Tasks follow identical flow as manual prompts
+
+### Web Interface Improvements  
+- **Persistent Tab Focus**: Active tab maintained across page reloads using localStorage
+- **Improved Task UI**: Simplified trash icon for task deletion positioned on schedule line
+- **Task Display Order**: Shows "Last run" before "Next run" for better chronological clarity
+- **Empty Message Handling**: Smart logic for replacing typing indicators vs. adding new messages
+
+### Technical Enhancements
+- **X-Forwarded-Prefix Support**: Pure header-based reverse proxy support without static configuration
+- **SSE Message Detection**: Enhanced server-side polling with debug logging for message broadcasting
+- **Container Timezone**: Docker configuration updated to support timezone mounting
 
 ## Modification Guidelines
 
@@ -170,12 +195,12 @@ When modifying this agent:
 - **Error handling**: Gracefully handle chat.py process failures and restarts
 - **Memory management**: Consider implementing message limits for long sessions
 - **MCP transparency**: Don't break the pass-through architecture to chat.py
-- **WebSocket stability**: Handle connection drops and reconnections gracefully
+- **HTTP reliability**: Simple request/response pattern with proper error handling
 
 ### Key Files
 - `agent.py`: Main entry point (69 lines)
 - `core.py`: Core business logic and chat session management
-- `web.py`: Web interface, API endpoints, and WebSocket handling  
+- `web.py`: Web interface, API endpoints, and HTTP request handling  
 - `models.py`: Data models, logging configuration, and config management
 - `monitor.py`: Task monitoring and auto-prompting system
 - `config.json`: All application configuration settings
@@ -187,7 +212,7 @@ When modifying this agent:
 ## Logging
 
 All API endpoints and chat operations are logged with:
-- **Comprehensive coverage**: Every API call, WebSocket message, and scheduled task
+- **Comprehensive coverage**: Every API call, HTTP request, and scheduled task
 - **Message truncation**: All user input truncated to 16 characters for clean logs
 - **Custom formatting**: Structured logging with prefixes ([API], [WEB], [TASK], etc.)
 - **Debug support**: Configurable debug mode via `/api/debug` endpoint
@@ -202,7 +227,7 @@ The application uses `config.json` for all configuration settings, eliminating h
 - **chat_system**: Python executable paths, script locations, environment variables
 - **timeouts**: All timeout values (prompt, message, process termination, etc.)
 - **limits**: Message history, buffer sizes, truncation lengths for logging
-- **session**: Session timeout, WebSocket close codes
+- **session**: Session timeout, HTTP response codes
 - **ui**: Refresh intervals, notification settings
 - **monitoring**: Task monitoring, auto-prompting settings
 
@@ -263,7 +288,7 @@ The agent includes an intelligent monitoring system that automatically detects w
 - **TaskMonitor Class** (`monitor.py`): Core monitoring logic and auto-prompting
 - **Detection Logic**: Scans responses for `/tool` commands on clean lines
 - **Counter Management**: Tracks retry attempts per unique task
-- **WebSocket Integration**: Broadcasts system messages to web interface
+- **Web Interface Integration**: System messages appear in chat interface
 
 ## Installation & Setup
 
