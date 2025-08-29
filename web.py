@@ -289,8 +289,8 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
 
     # Using simple HTTP request/response pattern
 
-    @app.post("/web/chat")
-    async def chat_endpoint(request: Request):
+    @app.post("/web/sessions/{session_id}/chat")
+    async def chat_endpoint(session_id: str, request: Request):
         """Simple HTTP request/response chat endpoint - direct message storage"""
         # Get web session ID for validation
         web_session_id = chat_manager.get_web_session_id(request)
@@ -298,13 +298,10 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         # Parse message from request body
         data = await request.json()
         message = data.get("message", "").strip()
-        session_id = data.get("session_id", "")
+        use_agent_prefix = data.get("use_agent_prefix", False)  # Optional flag for [AGENT] prefix
         
         if not message:
             raise HTTPException(status_code=400, detail="Message cannot be empty")
-        
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Session ID required")
         
         # Ensure session_id is always string for consistency
         session_id = str(session_id)
@@ -321,6 +318,18 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to create chat session")
         
+        # If use_agent_prefix is true, route through scheduler's queue for [AGENT] prefix
+        if use_agent_prefix:
+            # Execute through the scheduler's queue to get [AGENT] prefix
+            await scheduler.scheduled_message_for_session(session_id, message)
+            
+            logger.info(f"Message queued for session {session_id} with [AGENT] prefix")
+            return chat_manager.make_response_with_session({
+                "status": "queued",
+                "message": "Message queued with [AGENT] prefix"
+            }, web_session_id, request)
+        
+        # Otherwise, process normally without prefix
         # Store user message directly in chat history
         user_msg = ChatMessage(
             message=message,
@@ -400,9 +409,9 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             logger.warning(f"POST /web/sessions/{session_id}/schedule - Failed: {message[:truncate_len]}...")
             raise HTTPException(status_code=400, detail=message)
 
-    @app.get("/web/sessions/{session_id}/tasks")
-    async def stream_session_tasks(session_id: str):
-        """Stream scheduled tasks and new messages for a specific session via SSE"""
+    @app.get("/web/sessions/{session_id}/chat")
+    async def stream_session_chat(session_id: str):
+        """Stream chat messages and scheduled tasks for a specific session via SSE"""
         
         async def event_stream():
             # Start with current message count to avoid re-sending existing messages
@@ -441,13 +450,6 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
         return StreamingResponse(event_stream(), media_type="text/event-stream", 
                                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
 
-    @app.get("/web/tasks")
-    async def get_all_tasks():
-        """Get all scheduled tasks across all sessions"""
-        tasks = scheduler.get_scheduled_tasks()
-        logger.info(f"GET /web/tasks - Returned {len(tasks)} tasks across all sessions")
-        return {"tasks": tasks}
-
     @app.delete("/web/sessions/{session_id}/tasks")
     async def clear_session_tasks(session_id: str):
         """Clear all scheduled tasks for a specific session"""
@@ -481,23 +483,6 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             "task_count": session_info['task_count'],
             "is_connected": session_info['is_connected']
         }
-
-    @app.get("/web/status")
-    async def get_global_status(request: Request):
-        """Get global system status"""
-        # Get web session ID for cookie setting
-        web_session_id = chat_manager.get_web_session_id(request)
-        
-        status = {
-            "scheduler_running": scheduler.scheduler_running,
-            "task_queue_running": scheduler.running,
-            "total_sessions": len(scheduler.chat_sessions),
-            "chat_history_sessions": len(chat_manager.chat_history),
-            "available_sessions": chat_manager.get_available_sessions(web_session_id),
-            "web_session_id": web_session_id
-        }
-        logger.info(f"GET /web/status - {status['total_sessions']} sessions, {status['chat_history_sessions']} chat histories")
-        return chat_manager.make_response_with_session(status, web_session_id, request)
 
     @app.post("/web/sessions/new")
     async def create_new_session(request: Request):
@@ -653,77 +638,21 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
             "cleared_history": history_count
         }
 
-    @app.post("/web/debug")
-    async def toggle_debug(enable: bool):
-        """Toggle debug mode"""
-        import models
-        models.DEBUG_MODE = enable
-        scheduler.debug_mode = enable
-        
-        # Update all existing chat sessions
-        for session in scheduler.chat_sessions.values():
-            session.debug_mode = enable
-        
-        logger.info(f"POST /web/debug - Debug mode {'enabled' if enable else 'disabled'}")
-        return {"debug_mode": enable, "message": f"Debug mode {'enabled' if enable else 'disabled'}"}
-
-    @app.post("/web/monitoring")
-    async def toggle_monitoring(enable: bool):
-        """Toggle task monitoring globally"""
-        task_monitor = get_task_monitor()
-        task_monitor.set_global_monitoring(enable)
-        
-        logger.info(f"POST /web/monitoring - Task monitoring {'enabled' if enable else 'disabled'}")
-        return {"monitoring_enabled": enable, "message": f"Task monitoring {'enabled' if enable else 'disabled'}"}
-    
-    @app.get("/web/monitoring")
-    async def get_monitoring_status():
-        """Get task monitoring status and statistics"""
-        task_monitor = get_task_monitor()
-        stats = task_monitor.get_monitoring_stats()
-        
-        logger.info(f"GET /web/monitoring - Retrieved monitoring stats")
-        return {
-            "monitoring": stats,
-            "message": f"Monitoring {'enabled' if stats['monitoring_enabled'] else 'disabled'} for {stats['session_count']} sessions"
-        }
-    
-    @app.post("/web/monitoring/test")
-    async def test_monitoring():
-        """Test the monitoring system with sample responses"""
-        from monitor import test_monitor
-        
-        try:
-            monitor = test_monitor()
-            logger.info("POST /web/monitoring/test - Monitoring test completed")
-            return {
-                "status": "success",
-                "message": "Monitoring test completed - check server logs for results",
-                "monitoring_enabled": monitor.monitoring_enabled,
-                "monitored_sessions": list(monitor.monitored_sessions)
-            }
-        except Exception as e:
-            logger.error(f"POST /web/monitoring/test - Test failed: {e}")
-            return {
-                "status": "error", 
-                "message": f"Test failed: {e}"
-            }
-
-    @app.post("/web/task-plans/save")
-    async def save_task_plan(plan_name: str = None, session_id: str = None):
+    @app.post("/web/plans/save")
+    async def save_plan(plan_name: str = None, session_id: str = None):
         """Save scheduled tasks as a plan - from specific session if provided"""
         success, message = scheduler.save_task_plan(plan_name, session_id)
         
         if success:
-            logger.info(f"POST /web/task-plans/save - {message}")
+            logger.info(f"POST /web/plans/save - {message}")
             return {"success": True, "message": message}
         else:
-            logger.warning(f"POST /web/task-plans/save - Failed: {message}")
+            logger.warning(f"POST /web/plans/save - Failed: {message}")
             raise HTTPException(status_code=500, detail=message)
 
-    @app.post("/web/task-plans/{plan_name}/load")
-    async def load_task_plan(plan_name: str, session_id: str = None):
-        """Load a saved task plan and apply it to target session"""
+    @app.post("/web/plans/{plan_name}/load")
+    async def load_plan(plan_name: str, session_id: str = None):
+        """Load a saved plan and apply it to target session"""
         success, message = scheduler.load_task_plan(plan_name, session_id)
         
         if success:
@@ -733,17 +662,17 @@ def create_app(scheduler: TaskScheduler, chat_manager: ChatManager) -> FastAPI:
                 import asyncio
                 asyncio.create_task(scheduler.run_scheduler())
             
-            logger.info(f"POST /web/task-plans/{plan_name}/load - {message}")
+            logger.info(f"POST /web/plans/{plan_name}/load - {message}")
             return {"success": True, "message": message}
         else:
-            logger.warning(f"POST /web/task-plans/{plan_name}/load - Failed: {message}")
+            logger.warning(f"POST /web/plans/{plan_name}/load - Failed: {message}")
             raise HTTPException(status_code=404, detail=message)
 
-    @app.get("/web/task-plans")
-    async def get_task_plans():
-        """Get list of all saved task plans"""
+    @app.get("/web/plans")
+    async def get_plans():
+        """Get list of all saved plans"""
         plans = scheduler.get_saved_task_plans()
-        logger.info(f"GET /web/task-plans - Returned {len(plans)} saved plans")
+        logger.info(f"GET /web/plans - Returned {len(plans)} saved plans")
         return {"plans": plans}
 
     @app.get("/web/sessions/{session_id}/active-plan")

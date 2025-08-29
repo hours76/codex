@@ -778,3 +778,16 @@ body {
     0%, 50% { opacity: 1; }
     51%, 100% { opacity: 0; }
 }
+
+@keyframes tabPulse {
+    0%, 50% {
+        background: linear-gradient(135deg, #6c757d, #495057);
+    }
+    51%, 100% {
+        background: linear-gradient(135deg, #007bff, #0056b3);
+    }
+}
+
+.tab.conversing {
+    animation: tabPulse 1s infinite;
+}

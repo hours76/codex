@@ -141,7 +141,7 @@ The application is organized into separate modules for better maintainability:
 - `GET /static/*` - Static assets (CSS, JS)
 
 ### Chat API  
-- `POST /web/chat` - Send message and get response
+- `POST /web/sessions/{session_id}/chat` - Send message and get response for specific session
 
 ### REST API
 - `POST /api/sessions/{session_id}/schedule` - Schedule tasks for session
@@ -152,8 +152,6 @@ The application is organized into separate modules for better maintainability:
 - `GET /api/sessions` - List available sessions
 - `GET /api/sessions/{session_id}` - Get session information
 - `DELETE /api/sessions/{session_id}` - Cleanup session
-- `GET /api/status` - Global system status
-- `POST /api/debug` - Toggle debug mode
 
 ## Available Commands (via Chat Interface)
 
@@ -168,6 +166,12 @@ The application is organized into separate modules for better maintainability:
 - Session history persistence
 
 ## Recent Updates
+
+### API Endpoint Restructure
+- **Session-Specific Endpoints**: Replaced `/web/chat` with `/web/sessions/{session_id}/chat` for better REST compliance
+- **Agent Prefix Support**: Run button now uses scheduler's queue with optional `use_agent_prefix` flag
+- **Unified Execution Paths**: Run button and scheduler now share the same execution logic with `[AGENT]` prefix
+- **Improved Architecture**: Each session has dedicated chat and SSE endpoints for better resource isolation
 
 ### Scheduled Tasks Real-time Display
 - **Unified Processing**: Scheduled tasks now use the same entry point as manual user input
@@ -215,7 +219,7 @@ All API endpoints and chat operations are logged with:
 - **Comprehensive coverage**: Every API call, HTTP request, and scheduled task
 - **Message truncation**: All user input truncated to 16 characters for clean logs
 - **Custom formatting**: Structured logging with prefixes ([API], [WEB], [TASK], etc.)
-- **Debug support**: Configurable debug mode via `/api/debug` endpoint
+- **Debug support**: Configurable debug mode via configuration file
 
 ## Configuration
 

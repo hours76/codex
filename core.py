@@ -290,7 +290,7 @@ class TaskScheduler:
         self.debug_mode = DEBUG_MODE
         self.scheduled_tasks = {}  # Dictionary: session_id -> [tasks]
         self.active_plans = {}  # Dictionary: session_id -> plan_name
-        self.plan_usage = {}  # Dictionary: plan_name -> set of session_ids that loaded it
+        # No longer tracking plan_usage - we scan active_plans in real-time instead
         self.scheduler_running = False
         self.chat_manager_ref: Any = None  # Reference to ChatManager for broadcasting
         self.task_monitor = get_task_monitor()  # Task monitoring instance
@@ -335,12 +335,7 @@ class TaskScheduler:
                 plan_name = self.active_plans[session_id]
                 del self.active_plans[session_id]
                 
-                # Remove this session from plan usage tracking
-                if plan_name in self.plan_usage:
-                    self.plan_usage[plan_name].discard(session_id)
-                    # Clean up empty plan usage entries
-                    if not self.plan_usage[plan_name]:
-                        del self.plan_usage[plan_name]
+                # Plan usage is now calculated in real-time by scanning active_plans
             
             # Disable task monitoring for this session
             self.task_monitor.disable_monitoring(session_id)
@@ -607,12 +602,26 @@ class TaskScheduler:
             if session_id in self.scheduled_tasks:
                 count = len(self.scheduled_tasks[session_id])
                 self.scheduled_tasks[session_id] = []
+                
+                # Also clear the active plan for this session
+                if session_id in self.active_plans:
+                    plan_name = self.active_plans[session_id]
+                    del self.active_plans[session_id]
+                    
+                    # Plan usage is now calculated in real-time by scanning active_plans
         else:
             # Clear all tasks for all sessions
             for session_tasks in self.scheduled_tasks.values():
                 count += len(session_tasks)
             for session_id in self.scheduled_tasks:
                 self.scheduled_tasks[session_id] = []
+                
+                # Clear all active plans
+                if session_id in self.active_plans:
+                    plan_name = self.active_plans[session_id]
+                    del self.active_plans[session_id]
+                    
+                    # Plan usage is now calculated in real-time by scanning active_plans
             
         # Stop scheduler if no tasks remain
         total_tasks = sum(len(tasks) for tasks in self.scheduled_tasks.values())
@@ -763,10 +772,7 @@ class TaskScheduler:
         if target_session_id:
             self.active_plans[target_session_id] = plan_name
             
-            # Track plan usage - add this session to the plan's usage set
-            if plan_name not in self.plan_usage:
-                self.plan_usage[plan_name] = set()
-            self.plan_usage[plan_name].add(target_session_id)
+            # Plan usage is now calculated in real-time by scanning active_plans
         
         return True, f"Loaded {loaded_tasks} tasks from plan '{plan_name}' to session {target_session_id or 'original sessions'}"
     
@@ -800,8 +806,8 @@ class TaskScheduler:
             else:
                 total_tasks = 0
             
-            # Count how many sessions are currently using this plan
-            usage_count = len(self.plan_usage.get(plan_name, set()))
+            # Count how many sessions are currently using this plan by scanning active_plans
+            usage_count = sum(1 for active_plan in self.active_plans.values() if active_plan == plan_name)
             
             plans.append({
                 "name": plan_name,

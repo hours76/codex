@@ -42,7 +42,7 @@ function apiUrl(path) {
 function connectSession(sessionId) {
     // Update tab and session name to show ready state
     const last4Digits = sessionId.toString().slice(-4);
-    const sessionName = `Chat ${last4Digits}`;
+    const sessionName = `Agent ${last4Digits}`;
     
     const tab = document.querySelector(`[data-session="${sessionId}"].tab .tab-title`);
     if (tab && tab.textContent.includes('Init...')) {
@@ -51,7 +51,7 @@ function connectSession(sessionId) {
     
     // Create session object if it doesn't exist
     if (!sessions[sessionId]) {
-        sessions[sessionId] = {};
+        sessions[sessionId] = new AgentSession(sessionId);
     }
     
     sessions[sessionId].name = sessionName;
@@ -104,11 +104,8 @@ async function attemptSessionRecovery() {
                     maxSessionId = Math.max(maxSessionId, sessionId);
                     
                     // Create session object
-                    sessions[sessionId] = {
-                        id: sessionId,
-                        name: `Chat ${sessionId}`,
-                        existsOnServer: true  // Recovered from server
-                    };
+                    sessions[sessionId] = new AgentSession(sessionId, `Agent ${sessionId}`);
+                    sessions[sessionId].existsOnServer = true;  // Recovered from server
                     
                     // Create tab for this session
                     createTabElement(sessionId);
@@ -116,6 +113,9 @@ async function attemptSessionRecovery() {
                     
                     // Update session UI to show it's ready
                     connectSession(sessionId);
+                    
+                    // Initialize SSE connection for this session
+                    sessions[sessionId].connectSSE();
                     
                     // Set as active session if it was the previously active one, or if no active session set yet
                     if (sessionId === parseInt(previousActiveSession)) {
@@ -189,19 +189,204 @@ async function loadSessionHistory(sessionId) {
     }
 }
 
+// Agent Session class with its own SSE connection
+class AgentSession {
+    constructor(id, name = null) {
+        this.id = id;
+        this.name = name || `Session ${id}`;
+        this.messages = [];
+        this.tasks = [];  // Initialize tasks array
+        this.existsOnServer = false;
+        this.connected = false;
+        
+        // SSE connection for this specific session
+        this.sseConnection = null;
+        this.sseReconnectAttempts = 0;
+        this.sseLastMessageTime = 0;
+        this.sseHealthCheckInterval = null;
+        this.isConnecting = false;
+        this.historyLoading = false;
+    }
+    
+    // Connect or reconnect SSE for this session
+    connectSSE() {
+        // Already connected and valid
+        if (this.sseConnection && this.sseConnection.readyState === EventSource.OPEN) {
+            console.log(`SSE already connected for session ${this.id}`);
+            return;
+        }
+        
+        // Already trying to connect
+        if (this.isConnecting) {
+            console.log(`SSE connection in progress for session ${this.id}`);
+            return;
+        }
+        
+        // Close any existing dead connection
+        if (this.sseConnection) {
+            console.log(`Closing dead SSE connection for session ${this.id}`);
+            this.closeSSE();
+        }
+        
+        this.isConnecting = true;
+        
+        try {
+            console.log(`Creating SSE connection for session ${this.id}`);
+            this.sseConnection = new EventSource(apiUrl(`/web/sessions/${this.id}/chat`));
+            
+            this.sseConnection.onopen = () => {
+                console.log(`SSE connected for session ${this.id}`);
+                this.isConnecting = false;
+                this.sseReconnectAttempts = 0;
+                this.sseLastMessageTime = Date.now();
+                this.startHealthCheck();
+            };
+            
+            this.sseConnection.onmessage = (event) => {
+                this.sseLastMessageTime = Date.now();
+                this.handleSSEMessage(event);
+            };
+            
+            this.sseConnection.onerror = (error) => {
+                console.error(`SSE error for session ${this.id}:`, error);
+                this.isConnecting = false;
+                
+                if (this.sseConnection.readyState === EventSource.CLOSED) {
+                    this.reconnectSSE();
+                }
+            };
+        } catch (error) {
+            console.error(`Failed to create SSE for session ${this.id}:`, error);
+            this.isConnecting = false;
+        }
+    }
+    
+    handleSSEMessage(event) {
+        try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'tasks') {
+                // Store tasks in session object
+                this.tasks = data.data;
+                
+                // Update UI only if this is the active session
+                if (this.id === activeSessionId) {
+                    displayTasks(data.data);
+                    taskCount.textContent = data.data.length;
+                }
+            } else if (data.type === 'messages') {
+                // Always handle messages for this session (background or active)
+                this.handleMessages(data.data);
+            }
+        } catch (error) {
+            console.error(`Error parsing SSE data for session ${this.id}:`, error);
+        }
+    }
+    
+    handleMessages(messages) {
+        for (const message of messages) {
+            if (message.sender === 'user' && message.message.startsWith('[AGENT]')) {
+                addMessageToSession(this.id, message);
+                
+                const typingMessage = {
+                    message: '',
+                    sender: 'assistant',
+                    timestamp: new Date().toISOString()
+                };
+                addTypingMessage(this.id, typingMessage);
+            } else if (message.sender === 'assistant') {
+                this.handleAssistantMessage(message);
+            }
+        }
+    }
+    
+    handleAssistantMessage(message) {
+        if (!this.messages) {
+            this.messages = [];
+        }
+        this.messages.push(message);
+        
+        const typingIndicators = document.querySelectorAll(`#chat-area-${this.id} .message.typing`);
+        const latestTypingIndicator = typingIndicators[typingIndicators.length - 1];
+        
+        if (latestTypingIndicator) {
+            const messageContent = latestTypingIndicator.querySelector('.message-content');
+            if (messageContent) {
+                let formattedResponse = message.message
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;')
+                    .replace(/\n/g, '<br>');
+                
+                messageContent.innerHTML = formattedResponse;
+                messageContent.classList.remove('typing-cursor');
+                
+                const timestampElement = latestTypingIndicator.querySelector('.timestamp');
+                if (timestampElement) {
+                    timestampElement.textContent = new Date().toLocaleTimeString();
+                }
+                
+                latestTypingIndicator.classList.remove('typing');
+                
+                // Update tab animation after removing typing indicator
+                updateTabConversationStatus(this.id);
+            }
+        } else {
+            addMessageToSession(this.id, message);
+        }
+    }
+    
+    startHealthCheck() {
+        this.stopHealthCheck();
+        this.sseHealthCheckInterval = setInterval(() => {
+            const timeSinceLastMessage = Date.now() - this.sseLastMessageTime;
+            if (timeSinceLastMessage > 5000) {
+                console.warn(`SSE health check failed for session ${this.id}: ${timeSinceLastMessage}ms`);
+                this.reconnectSSE();
+            }
+        }, 5000);
+    }
+    
+    stopHealthCheck() {
+        if (this.sseHealthCheckInterval) {
+            clearInterval(this.sseHealthCheckInterval);
+            this.sseHealthCheckInterval = null;
+        }
+    }
+    
+    reconnectSSE() {
+        this.stopHealthCheck();
+        const delay = Math.min(1000 * Math.pow(2, this.sseReconnectAttempts), 30000);
+        this.sseReconnectAttempts++;
+        
+        console.log(`Reconnecting SSE for session ${this.id} in ${delay}ms (attempt ${this.sseReconnectAttempts})`);
+        
+        setTimeout(() => {
+            this.connectSSE();
+        }, delay);
+    }
+    
+    closeSSE() {
+        this.stopHealthCheck();
+        if (this.sseConnection) {
+            this.sseConnection.close();
+            this.sseConnection = null;
+        }
+        this.isConnecting = false;
+    }
+}
+
 // Create a new session when recovery fails
 async function createNewSession() {
     try {
-        
         // Create temporary session ID for immediate UI feedback
         const tempSessionId = Date.now();
         
-        // Create session object and UI elements immediately
-        sessions[tempSessionId] = {
-            id: tempSessionId,
-            name: `Init...`,
-            existsOnServer: false  // New session, not created on server yet
-        };
+        // Create session object using AgentSession class
+        sessions[tempSessionId] = new AgentSession(tempSessionId, `Init...`);
+        sessions[tempSessionId].existsOnServer = false;
         
         activeSessionId = tempSessionId;
         
@@ -227,10 +412,7 @@ async function createNewSession() {
             
             // Update the session with the real server-provided ID
             delete sessions[tempSessionId];
-            sessions[newSessionId] = {
-                id: newSessionId,
-                name: `Init...`
-            };
+            sessions[newSessionId] = new AgentSession(newSessionId, `Init...`);
             
             // Update DOM elements with real session ID
             const tab = document.querySelector(`[data-session="${tempSessionId}"].tab`);
@@ -262,6 +444,9 @@ async function createNewSession() {
             
             // Update session UI to show it's ready
             connectSession(newSessionId);
+            
+            // Initialize SSE connection for this new session
+            sessions[newSessionId].connectSSE();
             
         } else {
             // Remove the temporary session on failure
@@ -349,6 +534,9 @@ function addTypingMessage(sessionId, message) {
     
     chatArea.scrollTop = chatArea.scrollHeight;
     
+    // Update tab animation AFTER typing indicator is added to DOM
+    updateTabConversationStatus(sessionId);
+    
     return messageDiv;
 }
 
@@ -382,37 +570,50 @@ async function sendMessage() {
                 sender: 'assistant',
                 timestamp: new Date().toISOString()
             };
-            const typingMessageDiv = addTypingMessage(activeSessionId, typingMessage);
+            let typingMessageDiv = null;
             
-            // Send message via HTTP and get AI response
-            const response = await fetch(apiUrl('/web/chat'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                credentials: 'same-origin',
-                body: JSON.stringify({ 
-                    message: message,
-                    session_id: activeSessionId
-                })
-            });
-            
-            if (response.ok) {
-                // Message sent successfully - AI response will come via SSE
-                console.log('Message sent successfully, waiting for SSE response...');
-                // Keep typing indicator active until SSE delivers assistant response
-            } else {
-                const error = await response.text();
+            try {
+                typingMessageDiv = addTypingMessage(activeSessionId, typingMessage);
+                
+                // Send message via HTTP and get AI response
+                const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/chat`), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ 
+                        message: message
+                    })
+                });
+                
+                if (response.ok) {
+                    // Message sent successfully - AI response will come via SSE
+                    console.log('Message sent successfully, waiting for SSE response...');
+                    // Keep typing indicator active until SSE delivers assistant response
+                } else {
+                    const error = await response.text();
+                    // Remove typing indicator on error
+                    if (typingMessageDiv && typingMessageDiv.remove) {
+                        typingMessageDiv.remove();
+                    }
+                    showNotification(`Failed to send message: ${error}`, 'error');
+                }
+            } catch (error) {
                 // Remove typing indicator on error
-                typingMessageDiv.remove();
+                if (typingMessageDiv && typingMessageDiv.remove) {
+                    typingMessageDiv.remove();
+                }
                 showNotification(`Failed to send message: ${error}`, 'error');
+            } finally {
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                messageInput.focus();
             }
-            
         } catch (error) {
-            // Remove typing indicator on error
-            typingMessageDiv.remove();
-            showNotification(`Failed to send message: ${error}`, 'error');
-        } finally {
+            // Handle outer try block errors
+            console.error('Error in sendMessage:', error);
+            showNotification('Failed to send message', 'error');
             messageInput.disabled = false;
             sendButton.disabled = false;
             messageInput.focus();
@@ -473,9 +674,14 @@ function switchToTab(sessionId) {
     // Remember the active session for after page reload
     localStorage.setItem('lastActiveSession', sessionId);
     
-    // Load history if not already loaded
-    if (sessions[sessionId] && (!sessions[sessionId].messages || sessions[sessionId].messages.length === 0)) {
-        loadSessionHistory(sessionId);
+    // Load history if not already loaded and not currently loading
+    if (sessions[sessionId] && 
+        (!sessions[sessionId].messages || sessions[sessionId].messages.length === 0) &&
+        !sessions[sessionId].historyLoading) {
+        sessions[sessionId].historyLoading = true;
+        loadSessionHistory(sessionId).finally(() => {
+            sessions[sessionId].historyLoading = false;
+        });
     }
     
     // Refresh display to show active plan for this session
@@ -505,8 +711,8 @@ function switchToTab(sessionId) {
     
     // Session name no longer needed in scheduler header
     
-    // Refresh tasks for the active session
-    loadTasks();
+    // Refresh task display for the active session (no need to reconnect SSE)
+    refreshTasksDisplay();
     
     // Focus input
     messageInput.focus();
@@ -519,10 +725,10 @@ async function closeTab(sessionId) {
         // Continue with closing the original tab
     }
     
-    // Close SSE connection if this is the active session
-    if (sessionId === activeSessionId && taskEventSource) {
-        taskEventSource.close();
-        taskEventSource = null;
+    // Close SSE connection for this session
+    const session = sessions[sessionId];
+    if (session) {
+        session.closeSSE();
     }
     
     // Delete session on server side
@@ -594,123 +800,41 @@ async function scheduleTask() {
     }
 }
 
-// SSE connection for real-time tasks and messages
-let taskEventSource = null;
+// SSE Connection Manager - Singleton pattern
 
 // Load and display tasks for active session using SSE
-let loadTasksTimeout;
 function loadTasks() {
-    // Debounce to prevent duplicate calls
-    clearTimeout(loadTasksTimeout);
-    loadTasksTimeout = setTimeout(() => {
-        _loadTasksInternal();
-    }, 100);
-}
-
-function _loadTasksInternal() {
-    // Close existing SSE connection if any
-    if (taskEventSource) {
-        taskEventSource.close();
-        taskEventSource = null;
-    }
-    
     if (!activeSessionId) {
         console.warn('No active session for tasks');
         return;
     }
     
-    try {
-        // Open SSE connection for real-time updates
-        taskEventSource = new EventSource(apiUrl(`/web/sessions/${activeSessionId}/tasks`));
-        
-        taskEventSource.onmessage = function(event) {
-            try {
-                const data = JSON.parse(event.data);
-                
-                if (data.type === 'tasks') {
-                    // Update tasks display in real-time
-                    displayTasks(data.data);
-                    taskCount.textContent = data.data.length;
-                } else if (data.type === 'messages') {
-                    // Display scheduled user messages and assistant responses from SSE
-                    for (const message of data.data) {
-                        // Display scheduled user messages (those starting with [AGENT])
-                        if (message.sender === 'user' && message.message.startsWith('[AGENT]')) {
-                            // Display the scheduled user message
-                            addMessageToSession(activeSessionId, message);
-                            
-                            // Create typing indicator for assistant response (same as manual messages)
-                            const typingMessage = {
-                                message: '',
-                                sender: 'assistant',
-                                timestamp: new Date().toISOString()
-                            };
-                            const typingMessageDiv = addTypingMessage(activeSessionId, typingMessage);
-                        }
-                        // Display assistant responses via SSE
-                        else if (message.sender === 'assistant') {
-                            // Step 1: Write to client cache FIRST (sequential data flow)
-                            if (!sessions[activeSessionId].messages) {
-                                sessions[activeSessionId].messages = [];
-                            }
-                            sessions[activeSessionId].messages.push(message);
-                            
-                            // Step 2: Check if there's a typing indicator to replace
-                            const typingIndicators = document.querySelectorAll(`#chat-area-${activeSessionId} .message.typing`);
-                            const latestTypingIndicator = typingIndicators[typingIndicators.length - 1];
-                            
-                            if (latestTypingIndicator) {
-                                // Replace typing indicator with new message
-                                const messageContent = latestTypingIndicator.querySelector('.message-content');
-                                if (messageContent) {
-                                    // Format and display the response
-                                    let formattedResponse = message.message
-                                        .replace(/&/g, '&amp;')
-                                        .replace(/</g, '&lt;')
-                                        .replace(/>/g, '&gt;')
-                                        .replace(/"/g, '&quot;')
-                                        .replace(/'/g, '&#039;')
-                                        .replace(/\n/g, '<br>');
-                                    
-                                    messageContent.innerHTML = formattedResponse;
-                                    messageContent.classList.remove('typing-cursor');
-                                    
-                                    // Update timestamp
-                                    const timestampElement = latestTypingIndicator.querySelector('.timestamp');
-                                    if (timestampElement) {
-                                        timestampElement.textContent = new Date().toLocaleTimeString();
-                                    }
-                                    
-                                    // Remove typing class
-                                    latestTypingIndicator.classList.remove('typing');
-                                }
-                            } else {
-                                // No typing indicator, just add as new message
-                                addMessageToSession(activeSessionId, message);
-                            }
-                        }
-                        // Ignore all other message types (user, system, etc.)
-                    }
-                }
-            } catch (parseError) {
-                console.error('Error parsing SSE data:', parseError);
-            }
-        };
-        
-        taskEventSource.onerror = function(error) {
-            console.error('SSE error:', error);
-            // Don't show notification for every error to avoid spam
-        };
-        
-        taskEventSource.onopen = function() {
-            console.log('SSE connection opened for session', activeSessionId);
-        };
-        
-    } catch (error) {
-        console.error('Error setting up SSE for tasks:', error);
-        showNotification('Error loading tasks', 'error');
+    // Get the session object and connect its SSE
+    const session = sessions[activeSessionId];
+    if (session) {
+        session.connectSSE();
     }
 }
+
+// Refresh task display using current session data (tasks come via SSE)
+function refreshTasksDisplay() {
+    if (!activeSessionId) {
+        console.warn('No active session for task display');
+        displayTasks([]);
+        taskCount.textContent = '0';
+        return;
+    }
+    
+    const session = sessions[activeSessionId];
+    if (session) {
+        displayTasks(session.tasks || []);
+        taskCount.textContent = (session.tasks || []).length;
+    } else {
+        displayTasks([]);
+        taskCount.textContent = '0';
+    }
+}
+
 
 // Display tasks in the sidebar
 function displayTasks(tasks) {
@@ -783,6 +907,15 @@ async function clearAllTasks() {
             const result = await response.json();
             showNotification(result.message, 'success');
             loadTasks(); // Refresh task list
+            
+            // Clear the active plan display
+            const currentPlansList = document.getElementById('current-plans-list');
+            if (currentPlansList) {
+                currentPlansList.innerHTML = '<div class="no-plans">No active plan</div>';
+            }
+            
+            // Update saved plans to refresh the display
+            await loadSavedPlans();
         } else {
             showNotification('Error clearing tasks', 'error');
         }
@@ -791,9 +924,27 @@ async function clearAllTasks() {
     }
 }
 
+// Update tab animation based on conversation status (typing indicators)
+function updateTabConversationStatus(sessionId) {
+    const tab = document.querySelector(`[data-session="${sessionId}"].tab`);
+    if (!tab) return;
+    
+    // Check if there are typing indicators in this session
+    const typingIndicators = document.querySelectorAll(`#chat-area-${sessionId} .message.typing`);
+    const hasTypingIndicators = typingIndicators.length > 0;
+    
+    if (hasTypingIndicators) {
+        tab.classList.add('conversing');
+    } else {
+        tab.classList.remove('conversing');
+    }
+}
+
 // Show notification
 function showNotification(message, type = 'info') {
     const notification = document.createElement('div');
+    
+    // All messages in upper right corner
     notification.style.cssText = `
         position: fixed;
         top: 20px;
@@ -809,17 +960,16 @@ function showNotification(message, type = 'info') {
     
     switch (type) {
         case 'success':
-            notification.style.backgroundColor = '#28a745';
+            notification.style.backgroundColor = '#6c757d'; // Grey background
             break;
         case 'error':
-            notification.style.backgroundColor = '#dc3545';
+            notification.style.backgroundColor = '#dc3545'; // Keep red for errors
             break;
         case 'warning':
-            notification.style.backgroundColor = '#ffc107';
-            notification.style.color = '#000';
+            notification.style.backgroundColor = '#6c757d'; // Grey background
             break;
         default:
-            notification.style.backgroundColor = '#17a2b8';
+            notification.style.backgroundColor = '#6c757d'; // Grey background
     }
     
     notification.textContent = message;
@@ -833,6 +983,72 @@ function showNotification(message, type = 'info') {
 }
 
 // Plan management functions
+async function runPlan() {
+    if (!activeSessionId) {
+        showNotification('No active session', 'error');
+        return;
+    }
+    
+    try {
+        // Get current scheduled tasks from the server
+        const tasksResponse = await fetch(apiUrl(`/web/sessions/${activeSessionId}`));
+        if (!tasksResponse.ok) {
+            showNotification('Failed to get session tasks', 'error');
+            return;
+        }
+        
+        const sessionInfo = await tasksResponse.json();
+        const taskCount = sessionInfo.task_count || 0;
+        
+        if (taskCount === 0) {
+            showNotification('No scheduled tasks to run in current session', 'error');
+            return;
+        }
+        
+        // Get the actual task details from session data
+        const session = sessions[activeSessionId];
+        const tasks = session?.tasks || [];
+        
+        if (tasks.length === 0) {
+            showNotification('Task details not available. Please wait for tasks to load.', 'error');
+            return;
+        }
+        
+        let executedCount = 0;
+        
+        // Execute each task immediately by sending as chat message
+        for (const task of tasks) {
+            if (task.message && task.message.trim()) {
+                // Send task message with [AGENT] prefix through scheduler's queue
+                const response = await fetch(apiUrl(`/web/sessions/${activeSessionId}/chat`), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        message: task.message,
+                        use_agent_prefix: true  // This routes through scheduler's queue for [AGENT] prefix
+                    })
+                });
+                
+                if (response.ok) {
+                    executedCount++;
+                    // Small delay between tasks to avoid overwhelming
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                } else {
+                    console.warn(`Failed to execute task: ${task.message}`);
+                }
+            }
+        }
+        
+        showNotification(`Executed ${executedCount} tasks from plan immediately`, 'success');
+        
+    } catch (error) {
+        console.error('Error running plan:', error);
+        showNotification('Error running plan: ' + error.message, 'error');
+    }
+}
+
 async function savePlan() {
     try {
         // Get the current active plan name to use as default
@@ -851,7 +1067,7 @@ async function savePlan() {
             return;
         }
         
-        const url = apiUrl(`/web/task-plans/save?plan_name=${encodeURIComponent(planName.trim())}&session_id=${activeSessionId}`);
+        const url = apiUrl(`/web/plans/save?plan_name=${encodeURIComponent(planName.trim())}&session_id=${activeSessionId}`);
         const response = await fetch(url, {
             method: 'POST'
         });
@@ -872,7 +1088,7 @@ async function savePlan() {
 
 async function refreshPlans() {
     try {
-        const response = await fetch(apiUrl('/web/task-plans'));
+        const response = await fetch(apiUrl('/web/plans'));
         if (response.ok) {
             const data = await response.json();
             
@@ -908,7 +1124,7 @@ async function loadSavedPlans() {
 
 async function _loadSavedPlansInternal() {
     try {
-        const response = await fetch(apiUrl('/web/task-plans'));
+        const response = await fetch(apiUrl('/web/plans'));
         if (response.ok) {
             const data = await response.json();
             displayCurrentPlans(data.plans);
@@ -1029,7 +1245,7 @@ async function loadSelectedPlan(planName) {
             return;
         }
         
-        const response = await fetch(apiUrl(`/web/task-plans/${encodeURIComponent(planName)}/load?session_id=${activeSessionId}`), {
+        const response = await fetch(apiUrl(`/web/plans/${encodeURIComponent(planName)}/load?session_id=${activeSessionId}`), {
             method: 'POST'
         });
         
@@ -1062,8 +1278,10 @@ clearAllTasksButton.addEventListener('click', clearAllTasks);
 
 // Plan management event listeners
 const savePlanButton = document.getElementById('save-plan-button');
+const runPlanButton = document.getElementById('run-plan-button');
 const loadPlansButton = document.getElementById('load-plans-button');
 savePlanButton.addEventListener('click', savePlan);
+runPlanButton.addEventListener('click', runPlan);
 loadPlansButton.addEventListener('click', refreshPlans);
 
 messageInput.addEventListener('keypress', function(e) {
@@ -1097,6 +1315,16 @@ document.addEventListener('click', function(e) {
 });
 
 // SSE replaces polling - no need for setInterval
+
+// Clean up connections on page unload
+window.addEventListener('beforeunload', function() {
+    // Close all SSE connections
+    for (const session of Object.values(sessions)) {
+        if (session && session.closeSSE) {
+            session.closeSSE();
+        }
+    }
+});
 
 // Initialize page: attempt recovery then connect sessions
 async function initializePage() {

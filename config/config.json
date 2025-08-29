@@ -63,17 +63,22 @@
           "schedule_spec": "every 10 min"
         },
         {
+          "message": "get patient profile: steve",
+          "schedule_spec": "every 10 min"
+        },
+        {
           "message": "check new glucose reading in recent 10 min for patient id: steve",
           "schedule_spec": "every 10 min"
         },
         {
-          "message": "get message device info by device id: 8e3dea78388b8964",
+          "message": "if there is new reading in recent 10 minutes, send a message about it to Steve to encourage him to continue",
           "schedule_spec": "every 10 min"
         },
         {
-          "message": "if there is new reading, send a message about it to Steve to encourage him to continue, otherwise send a reminder to him.",
-          "schedule_spec": "every 10 min"
+          "message": "if it's arohnd 2 hours after breakfast/lunch/dinner, send a reminder message to Steve to measure his glucose",
+          "schedule_spec": "every 1 hour"
         }
+
       ]
     },
     "Analysis": {
@@ -103,11 +108,19 @@
       "created_at": "2025-08-14T09:36:53.844315",
       "tasks": [
         {
-          "message": "/clear",
+          "message": "how is the compliance of doing measurement for breakfast, lunch and dinner",
           "schedule_spec": "every 10 min"
         },
         {
           "message": "check current time",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "how is the glucose readings in 7 days for patient id: steve",
+          "schedule_spec": "every 10 min"
+        },
+        {
+          "message": "how is the compliance of doing measurement for breakfast, lunch and dinner last 7 days",
           "schedule_spec": "every 10 min"
         }
       ]
